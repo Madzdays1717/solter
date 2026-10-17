@@ -29,6 +29,8 @@ class Rules:
     max_lag: float = 30           # newest buy must be this fresh (seconds)
     max_run: float = 1.0          # price rise across the window (1.0 = +100%)
     min_span: float = 20          # seconds between first and last buy
+    min_recent_buyers: int = 3
+    min_burst: int = 3
     recent: float = 45            # seconds that count as "now"
 
 
@@ -118,7 +120,7 @@ def evaluate(trades: list[Trade], now: float, rules: Rules = Rules(),
         return verdict('weak net inflow')
     if volume < rules.min_volume_sol:
         return verdict('low volume')
-    if len(recent) < 3 or burst < 3:
+    if len(recent) < rules.min_recent_buyers or burst < rules.min_burst:
         return verdict('momentum faded')
     if now - buys[-1].at > rules.max_lag:
         return verdict('stale flow')

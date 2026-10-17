@@ -15,7 +15,7 @@ SWEEP, BACKFILL, FALLBACK, DECISION = 'sweep', 'backfill', 'fallback', 'decision
 # may only use capacity no other kind still has reserved for the rest of the day,
 # so backfill or fallback can never starve the sweep (the only way new launches
 # are found) or the checks a call depends on.
-QUOTAS = {SWEEP: .45, BACKFILL: .15, FALLBACK: .15, DECISION: .25}
+QUOTAS = {SWEEP: .62, BACKFILL: .15, FALLBACK: .05, DECISION: .18}
 
 
 class NoBudget(RuntimeError):
@@ -55,10 +55,12 @@ class BoundedRPC:
         async with self.lock:
             if not allowed(kind, self.store.budget_by_kind(), self.per_day, day_left()):
                 raise NoBudget(f'daily RPC budget reached for {kind}')
-            now = time.monotonic()
-            while self.recent and now - self.recent[0] >= 60:
-                self.recent.popleft()
-            if len(self.recent) >= self.per_minute:
+            while True:
+                now = time.monotonic()
+                while self.recent and now - self.recent[0] >= 60:
+                    self.recent.popleft()
+                if len(self.recent) < self.per_minute:
+                    break
                 await asyncio.sleep(max(.05, 60 - (now - self.recent[0])))
             self.store.budget_claim(kind)
             self.recent.append(time.monotonic())

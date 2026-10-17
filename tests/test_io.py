@@ -57,10 +57,10 @@ class StoreCase(unittest.TestCase):
 
 class RPCTests(StoreCase):
     def test_kinds_keep_their_reservation(self):
-        day = 100   # quotas: sweep 45, backfill 15, fallback 15, decision 25
+        day = 100   # quotas: sweep 62, backfill 15, fallback 5, decision 18
         self.assertTrue(allowed('sweep', {'backfill': 15}, day, 1.0))
         self.assertFalse(allowed('backfill', {'backfill': 15}, day, 1.0))       # sweep's share is untouchable
-        self.assertFalse(allowed('sweep', {'sweep': 45}, day, 1.0))
+        self.assertFalse(allowed('sweep', {'sweep': 62}, day, 1.0))
         self.assertTrue(allowed('backfill', {'backfill': 15, 'sweep': 40}, day, .1))   # late: spare may be borrowed
         self.assertFalse(allowed('decision', {'sweep': 60, 'backfill': 40}, day, .5))  # hard daily ceiling
         self.assertEqual(round(day_left(86400 * 3 + 21600), 2), .75)
@@ -79,7 +79,7 @@ class RPCTests(StoreCase):
                 n += 1
         with patch('solter.rpc.day_left', return_value=1.0):
             used = {k: asyncio.run(spend(k)) for k in ('backfill', 'fallback', 'decision', 'sweep')}
-        self.assertEqual(used, {'backfill': 3, 'fallback': 3, 'decision': 5, 'sweep': 9})
+        self.assertEqual(used, {'backfill': 3, 'fallback': 1, 'decision': 4, 'sweep': 12})
         self.assertEqual((session.attempts, self.db.budget_used()), (20, 20))
 
     def test_rpc_error_is_none(self):
@@ -211,8 +211,8 @@ class ConfigTests(unittest.TestCase):
         public = cfg.public()
         self.assertNotIn('SECRET', str(public))
         self.assertNotIn('secret', str(public))
-        self.assertEqual(cfg.rules().max_wallet_share, .35)      # 'seimbang' preset
-        self.assertEqual(cfg.call_mode, 'seimbang')
+        self.assertEqual(cfg.rules().max_wallet_share, .50)      # 'cepat' runtime preset
+        self.assertEqual(cfg.call_mode, 'cepat')
 
     def test_call_modes(self):
         from solter.config import PRESETS

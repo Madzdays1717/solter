@@ -1,3 +1,18 @@
+## v2.2.0 — momentum-first scanner (2026-10-18)
+
+- GeckoTerminal 5m trending/new-pool discovery, DexScreener profile/boost discovery-only,
+  DexScreener 30-mint batch 5m snapshots and rotating known migrated-token inventory.
+- Reawaken previously expired migrated tokens on fresh liquidity, buy pressure, volume and
+  price data, without automatic age exclusion. Calls still require on-chain flow and deep checks.
+- Faster first check, fair sweep queue, fewer irreversible quiet-token rejections,
+  dynamic live-slot preemption, concurrent evaluator and independent deep-check requests.
+- 12 live slots by default, `cepat` preset in .env example, 12 calls/hour ceiling (not quota),
+  expanded market cap window in fast mode; configurable scanner cadence/thresholds.
+- SQLite schema migration for market snapshots without losing calls, batch database writes,
+  improved provider key redaction in doctor, optional PumpPortal data API key.
+- Added market simulations and older-token revival tests; unit tests remain offline.
+- Limitation: no live mainnet performance or profitability validation included.
+
 # Changelog
 
 ## v2.1.0 (2026-10-17): volume, market cap, dan CALL_MODE

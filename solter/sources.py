@@ -82,3 +82,18 @@ def pair_facts(pair: dict | None) -> dict:
             'symbol': str((pair.get('baseToken') or {}).get('symbol') or '')[:32],
             'name': str((pair.get('baseToken') or {}).get('name') or '')[:80],
             'image': (pair.get('info') or {}).get('imageUrl')}
+
+
+def dex_list_mints(payload: object) -> list[str]:
+    """Optional profile/boost discovery only; a promoted listing is never a quality signal."""
+    if not isinstance(payload, list):
+        return []
+    mints, seen = [], set()
+    for item in payload:
+        if not isinstance(item, dict) or item.get('chainId') != 'solana':
+            continue
+        mint = item.get('tokenAddress')
+        if valid_address(mint) and mint not in seen:
+            mints.append(mint)
+            seen.add(mint)
+    return mints

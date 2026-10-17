@@ -16,6 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 class Config:
     tg_token: str = ''
     tg_chat: str = ''
+    portal_key: str = ''
     rpc_http: str = 'https://api.mainnet-beta.solana.com'
     rpc_ws: str = 'wss://api.mainnet-beta.solana.com'
     db_path: Path = ROOT / 'data' / 'solter-v2.sqlite3'
@@ -28,15 +29,22 @@ class Config:
     # Reservoir and live watch
     sweep_seconds: int = 30
     sweep_accounts: int = 200
-    reservoir_minutes: int = 60
+    reservoir_minutes: int = 720  # new launch discovery horizon; migrated tracks last market sighting
+    market_scan_seconds: int = 65  # GeckoTerminal public limit ~=10/min; cache ~=60 seconds
+    market_enabled: bool = True
+    market_min_buys: int = 7
+    market_min_volume_usd: float = 650.0
     alive_min_sol: float = 0.5
     promote_min_rate: float = 0.4
     promote_min_sol: float = 0.8
-    max_watch: int = 8
+    max_watch: int = 12
     watch_seconds: int = 300
     backfill_tx: int = 3
     # Flow gates
     min_buys: int = 6
+    min_recent_buyers: int = 3
+    min_burst: int = 3
+    min_span_seconds: float = 20
     min_buyers: int = 5
     min_net_sol: float = 1.5
     min_volume_sol: float = 4.0
@@ -61,7 +69,7 @@ class Config:
     min_score: int = 0
     min_liquidity_usd: float = 5000.0
     # Calls and follow-up
-    max_calls_per_hour: int = 5
+    max_calls_per_hour: int = 12
     track_minutes: int = 60
     followups: bool = True
 
@@ -70,9 +78,11 @@ class Config:
                      min_net_sol=self.min_net_sol, dust_sol=self.dust_sol,
                      max_wallet_share=self.max_wallet_share / 100,
                      max_bundle_share=self.max_bundle_share / 100,
-                     max_sell_ratio=self.max_sell_ratio / 100, max_lag=self.max_lag,
+                     max_sell_ratio=self.max_sell_ratio / 100,
                      max_run=self.max_run_pct / 100, min_volume_sol=self.min_volume_sol,
-                     max_churn=self.max_churn / 100)
+                     max_churn=self.max_churn / 100, max_lag=self.max_lag,
+                     min_span=self.min_span_seconds, min_recent_buyers=self.min_recent_buyers,
+                     min_burst=self.min_burst)
 
     def quality_rules(self) -> QualityRules:
         return QualityRules(self.max_top10_pct, self.max_holder_pct, self.max_dev_pct,
@@ -86,7 +96,10 @@ class Config:
                               promote_min_sol=self.promote_min_sol,
                               max_progress=self.max_progress,
                               max_dev_buy_pct=self.max_dev_buy_pct,
-                              max_creator_launches=self.max_creator_launches)
+                              max_creator_launches=self.max_creator_launches,
+                              market_min_buys=self.market_min_buys,
+                              market_min_volume_usd=self.market_min_volume_usd,
+                              market_min_liquidity_usd=self.min_liquidity_usd)
 
     @classmethod
     def load(cls, env: dict | None = None) -> 'Config':
@@ -94,7 +107,7 @@ class Config:
             from dotenv import load_dotenv
             load_dotenv(ROOT / '.env')
             env = dict(os.environ)
-        mode = str(env.get('CALL_MODE', '')).strip().lower() or cls.call_mode
+        mode = str(env.get('CALL_MODE', '')).strip().lower() or 'cepat'
         mode = MODE_ALIASES.get(mode, mode)
         if mode not in PRESETS:
             raise ValueError(f'CALL_MODE must be one of: {", ".join(PRESETS)}')
@@ -124,14 +137,20 @@ class Config:
             raise ValueError('MAX_MCAP_USD must be above MIN_MCAP_USD')
         return cls(tg_token=str(env.get('TELEGRAM_BOT_TOKEN', '')).strip(),
                    tg_chat=str(env.get('TELEGRAM_CHAT_ID', '')).strip(),
+                   portal_key=str(env.get('PUMPPORTAL_API_KEY', '')).strip(),
                    rpc_http=http, rpc_ws=ws, **values)
 
     def public(self) -> dict:
         """Settings safe to print: no token, no chat id, no RPC query string (API keys)."""
-        hidden = {'tg_token', 'tg_chat', 'db_path'}
+        hidden = {'tg_token', 'tg_chat', 'portal_key', 'db_path'}
         out = {f.name: getattr(self, f.name) for f in fields(self) if f.name not in hidden}
-        out['rpc_http'] = self.rpc_http.split('?')[0]
-        out['rpc_ws'] = self.rpc_ws.split('?')[0]
+        # API keys may appear in the provider URL path, query, or username.
+        from urllib.parse import urlsplit
+        for label, url in (('rpc_http', self.rpc_http), ('rpc_ws', self.rpc_ws)):
+            parsed = urlsplit(url)
+            host = parsed.hostname or 'hidden'
+            out[label] = f'{parsed.scheme}://{host}' + (f':{parsed.port}' if parsed.port else '')
+
         out['telegram_configured'] = bool(self.tg_token and self.tg_chat)
         return out
 
@@ -146,12 +165,20 @@ PRESETS = {
                      max_sell_ratio=70.0, max_churn=60.0, max_run_pct=200.0, max_top10_pct=35.0,
                      max_holder_pct=12.0, max_dev_pct=10.0, max_progress=95.0, min_mcap_usd=6000.0,
                      max_mcap_usd=80000.0, promote_min_rate=0.4, promote_min_sol=0.8),
+    'cepat': dict(min_buys=4, min_buyers=3, min_recent_buyers=2, min_burst=2,
+                  min_span_seconds=0, min_net_sol=0.8, min_volume_sol=2.0,
+                  max_wallet_share=50.0, max_sell_ratio=75.0, max_churn=70.0,
+                  max_bundle_share=65.0, max_run_pct=600.0, max_top10_pct=48.0,
+                  max_holder_pct=17.0, max_dev_pct=12.0, max_progress=100.0,
+                  min_mcap_usd=3000.0, max_mcap_usd=300000.0,
+                  promote_min_rate=0.25, promote_min_sol=0.35, min_score=43,
+                  max_creator_launches=0),
     'agresif': dict(min_buys=5, min_buyers=4, min_net_sol=1.0, min_volume_sol=3.0, max_wallet_share=45.0,
                     max_sell_ratio=80.0, max_churn=70.0, max_run_pct=400.0, max_top10_pct=45.0,
                     max_holder_pct=15.0, max_dev_pct=15.0, max_progress=100.0, min_mcap_usd=5000.0,
                     max_mcap_usd=150000.0, promote_min_rate=0.3, promote_min_sol=0.5),
 }
-MODE_ALIASES = {'strict': 'ketat', 'balanced': 'seimbang', 'aggressive': 'agresif'}
+MODE_ALIASES = {'strict': 'ketat', 'balanced': 'seimbang', 'aggressive': 'agresif', 'fast': 'cepat', 'momentum': 'cepat'}
 
 # field -> (environment variable, minimum, maximum); booleans ignore the bounds.
 ENV = {
@@ -160,14 +187,21 @@ ENV = {
     'dex_interval': ('DEX_SECONDS_BETWEEN', .2, 30),
     'sweep_seconds': ('SWEEP_SECONDS', 10, 600),
     'sweep_accounts': ('SWEEP_ACCOUNTS', 100, 500),
-    'reservoir_minutes': ('RESERVOIR_MINUTES', 10, 240),
+    'reservoir_minutes': ('RESERVOIR_MINUTES', 10, 10080),
+    'market_scan_seconds': ('MARKET_SCAN_SECONDS', 60, 600),
+    'market_enabled': ('MARKET_ENABLED', 0, 1),
+    'market_min_buys': ('MARKET_MIN_BUYS_5M', 1, 1000),
+    'market_min_volume_usd': ('MARKET_MIN_VOLUME_USD_5M', 0, 1000000),
     'alive_min_sol': ('ALIVE_MIN_SOL', 0, 50),
     'promote_min_rate': ('PROMOTE_MIN_SOL_PER_MIN', 0, 50),
     'promote_min_sol': ('PROMOTE_MIN_SOL', 0, 100),
-    'max_watch': ('MAX_ACTIVE_TOKENS', 1, 30),
+    'max_watch': ('MAX_ACTIVE_TOKENS', 1, 40),
     'watch_seconds': ('WATCH_SECONDS', 60, 1800),
     'backfill_tx': ('BACKFILL_TX', 0, 30),
     'min_buys': ('MIN_BUYS', 1, 200),
+    'min_recent_buyers': ('MIN_RECENT_BUYERS', 1, 50),
+    'min_burst': ('MIN_BURST_BUYS', 1, 50),
+    'min_span_seconds': ('MIN_BUY_SPAN_SECONDS', 0, 180),
     'min_buyers': ('MIN_UNIQUE_BUYERS', 1, 100),
     'min_net_sol': ('MIN_NET_SOL', 0, 500),
     'min_volume_sol': ('MIN_VOLUME_SOL', 0, 10000),

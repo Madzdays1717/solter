@@ -22,9 +22,14 @@ CREATE TABLE IF NOT EXISTS tokens (
   migrated_at REAL, promotions INTEGER NOT NULL DEFAULT 0, cooldown_until REAL NOT NULL DEFAULT 0,
   watch_started REAL, watch_until REAL, last_trade_at REAL, last_sig TEXT,
   first_price REAL, last_price REAL,
-  reason TEXT NOT NULL DEFAULT '');
+  reason TEXT NOT NULL DEFAULT '',
+  market_at REAL, market_buys INTEGER, market_sells INTEGER,
+  market_volume_usd REAL, market_liquidity_usd REAL, market_change_pct REAL,
+  market_mcap_usd REAL, pair_created_at REAL);
 CREATE INDEX IF NOT EXISTS tokens_state ON tokens(state, created_at);
 CREATE INDEX IF NOT EXISTS tokens_creator ON tokens(creator);
+CREATE INDEX IF NOT EXISTS tokens_sweep ON tokens(state, stage, checks, created_at);
+CREATE INDEX IF NOT EXISTS tokens_recheck ON tokens(state, stage, checked_at);
 CREATE TABLE IF NOT EXISTS trades (
   signature TEXT NOT NULL, idx INTEGER NOT NULL, mint TEXT NOT NULL, at REAL NOT NULL,
   slot INTEGER, wallet TEXT NOT NULL, side TEXT NOT NULL, tokens REAL NOT NULL,
@@ -64,8 +69,18 @@ class Store:
         self.db = sqlite3.connect(path, timeout=15)
         self.db.row_factory = sqlite3.Row
         self.db.execute('PRAGMA journal_mode=WAL')
+        # Speed up bursts of short transactions on Termux; WAL remains transactional.
+        self.db.execute('PRAGMA synchronous=NORMAL')
         self.db.execute('PRAGMA busy_timeout=10000')
         self.db.executescript(SCHEMA)
+        # Existing SQLite installations retain all calls and history.
+        installed = {r['name'] for r in self.db.execute('PRAGMA table_info(tokens)')}
+        for name, typ in (('market_at', 'REAL'), ('market_buys', 'INTEGER'),
+                          ('market_sells', 'INTEGER'), ('market_volume_usd', 'REAL'),
+                          ('market_liquidity_usd', 'REAL'), ('market_change_pct', 'REAL'),
+                          ('market_mcap_usd', 'REAL'), ('pair_created_at', 'REAL')):
+            if name not in installed:
+                self.db.execute(f'ALTER TABLE tokens ADD COLUMN {name} {typ}')
         self.db.commit()
         self.columns = {r['name'] for r in self.db.execute('PRAGMA table_info(tokens)')}
         self.outcome_columns = {r['name'] for r in self.db.execute('PRAGMA table_info(outcomes)')}
@@ -119,6 +134,23 @@ class Store:
         self.db.execute(f'UPDATE tokens SET {assignments} WHERE mint=?', (*fields.values(), mint))
         self.db.commit()
 
+    def update_many(self, changes: list[tuple[str, dict]]):
+        """Commit a scan batch once instead of fsyncing for every token."""
+        with self.db:
+            for mint, fields in changes:
+                fields = {k: v for k, v in fields.items() if k in self.columns and k != 'mint'}
+                if fields:
+                    assignments = ', '.join(f'{k}=?' for k in fields)
+                    self.db.execute(f'UPDATE tokens SET {assignments} WHERE mint=?',
+                                    (*fields.values(), mint))
+
+    def metric_many(self, changes: dict[str, int]):
+        with self.db:
+            for key, n in changes.items():
+                self.db.execute('INSERT INTO metrics(key, n) VALUES(?, ?) '
+                                'ON CONFLICT(key) DO UPDATE SET n = n + excluded.n',
+                                (key[:80], n))
+
     def migrate(self, mint: str, pool: str, now: float) -> str:
         """Point a token at its PumpSwap pool. Returns what the token was doing."""
         token = self.token(mint)
@@ -141,22 +173,85 @@ class Store:
         return was
 
     def sweep_batch(self, now: float, limit: int, first_check: float, recheck: float) -> list[dict]:
-        """Bonding tokens to read: alive ones by inflow, then new launches (newest first), then quiet rechecks."""
+        """Fair selection: newest launches plus oldest still-unchecked, then returning demand.
+
+        An always-newest queue silently starves older unexamined launches when
+        creation rates exceed RPC scan throughput. Never spend >limit reads.
+        """
+        limit = max(1, limit)
+        latest = self._rows('''SELECT * FROM tokens WHERE state='fresh' AND checks=0
+            AND stage='new' AND created_at<=? ORDER BY created_at DESC LIMIT ?''',
+            (now - first_check, max(1, int(limit * .45))))
+        oldest = self._rows('''SELECT * FROM tokens WHERE state='fresh' AND checks=0
+            AND stage='new' AND created_at<=? ORDER BY created_at ASC LIMIT ?''',
+            (now - first_check, max(1, int(limit * .35))))
         alive = self._rows('''SELECT * FROM tokens WHERE state='alive' AND stage='new'
-            ORDER BY traction DESC LIMIT ?''', (int(limit * .6),))
-        new = self._rows('''SELECT * FROM tokens WHERE state='fresh' AND checks=0 AND created_at<=?
-            ORDER BY created_at DESC LIMIT ?''', (now - first_check, limit))
-        quiet = self._rows('''SELECT * FROM tokens WHERE state='fresh' AND checks>0 AND checked_at<=?
-            ORDER BY created_at DESC LIMIT ?''', (now - recheck, limit))
+            AND (checked_at IS NULL OR checked_at<=?)
+            ORDER BY traction DESC, checked_at ASC LIMIT ?''',
+            (now - recheck, max(1, int(limit * .15))))
+        quiet = self._rows('''SELECT * FROM tokens WHERE state='fresh' AND checks>0
+            AND stage='new' AND checked_at<=? ORDER BY checked_at ASC LIMIT ?''',
+            (now - recheck, max(1, int(limit * .20))))
         batch, seen = [], set()
-        for row in alive + new + quiet:
+        for row in latest + oldest + alive + quiet:
             if row['mint'] not in seen and row['account'] and len(batch) < limit:
                 batch.append(row)
                 seen.add(row['mint'])
+        if len(batch) < limit:
+            remainder = self._rows('''SELECT * FROM tokens WHERE stage='new' AND
+                ((state='fresh' AND checks=0 AND created_at<=?) OR
+                 (state='fresh' AND checks>0 AND checked_at<=?) OR
+                 (state='alive' AND (checked_at IS NULL OR checked_at<=?)))
+                ORDER BY CASE WHEN checks=0 THEN 0 ELSE 1 END, created_at ASC LIMIT ?''',
+                (now - first_check, now - recheck, now - recheck, limit + len(seen)))
+            for row in remainder:
+                if row['mint'] not in seen and row['account'] and len(batch) < limit:
+                    batch.append(row)
+                    seen.add(row['mint'])
         return batch
 
+    def market_candidates(self, limit: int = 90) -> list[str]:
+        """Fair rotation of migrated inventory, including old tokens that may reawaken."""
+        return [r['mint'] for r in self._rows('''SELECT mint FROM tokens
+            WHERE stage='migrated' AND state IN ('alive','watching','fresh','expired')
+              AND mint NOT IN (SELECT mint FROM calls)
+            ORDER BY COALESCE(market_at,0) ASC LIMIT ?''', (limit,))]
+
+    def update_market(self, mint: str, pool: str, data: dict, now: float,
+                      eligible: bool | None = None) -> bool:
+        """Only verified caller-supplied PumpSwap pairs; never overwrite a sent call."""
+        token = self.token(mint)
+        if token and self.has_call(mint):
+            return False
+        if token is None:
+            self.db.execute('''INSERT INTO tokens(mint, symbol, name, created_at, stage, state,
+                account, migrated_at) VALUES (?, ?, ?, ?, 'migrated', 'alive', ?, ?)''',
+                (mint, data['symbol'], data['name'], data['pair_created_at'], pool,
+                 data['pair_created_at']))
+        elif token['stage'] != 'migrated':
+            self.migrate(mint, pool, now)
+        else:
+            self.db.execute("UPDATE tokens SET account=? WHERE mint=?", (pool, mint))
+        updates = {k: v for k, v in data.items() if k in self.columns and k != 'mint'}
+        if token and token['symbol']:
+            updates.pop('symbol', None)
+        if token and token['name']:
+            updates.pop('name', None)
+        # Do not spend watch slots on a stale/non-performing DEX listing.
+        from .market import market_ready
+        if eligible is None:
+            eligible = market_ready(data, now, 7, 650, 5000)
+        if token and token['state'] in ('expired','dead','fresh') and eligible:
+            updates.update(state='alive', reason='market activity revived')
+        values = ', '.join(f'{k}=?' for k in updates)
+        self.db.execute(f'UPDATE tokens SET {values} WHERE mint=?', (*updates.values(), mint))
+        self.db.commit()
+        return token is None
+
     def alive(self) -> list[dict]:
-        return self._rows("SELECT * FROM tokens WHERE state='alive' ORDER BY traction DESC LIMIT 500")
+        return self._rows("""SELECT * FROM tokens WHERE state='alive'
+            ORDER BY CASE WHEN stage='migrated' THEN 0 ELSE 1 END,
+                     COALESCE(market_at,checked_at,created_at) DESC LIMIT 1200""")
 
     def watching(self) -> list[dict]:
         return self._rows("SELECT * FROM tokens WHERE state='watching' ORDER BY watch_started")
@@ -181,9 +276,11 @@ class Store:
     def expire(self, now: float, reservoir_minutes: int) -> int:
         cur = self.db.execute('''UPDATE tokens SET state='expired',
             reason=CASE WHEN checks=0 THEN 'not checked in time' ELSE reason END
-            WHERE (state IN ('fresh','alive') AND COALESCE(migrated_at, created_at) < ?)
-               OR (state='fresh' AND checks=0 AND created_at < ?)''',
-                              (now - reservoir_minutes * 60, now - 600))
+            WHERE (state IN ('fresh','alive') AND
+                (CASE WHEN stage='migrated' THEN COALESCE(market_at,migrated_at,created_at)
+                 ELSE created_at END) < ?)
+               OR (state='fresh' AND stage='new' AND checks=0 AND created_at < ?)''',
+                              (now - reservoir_minutes * 60, now - max(600, reservoir_minutes * 60)))
         self.db.commit()
         return cur.rowcount
 

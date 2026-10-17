@@ -29,11 +29,13 @@ class ReservoirTests(unittest.TestCase):
         self.assertAlmostEqual(up['traction'], 4 / 2)       # 4 SOL from others over two minutes
         self.assertEqual(up['first_mcap_sol'], up['mcap_sol'])
 
-    def test_quiet_token_gets_one_more_look_then_dies(self):
+    def test_quiet_token_gets_another_chance_and_can_recover(self):
         up = classify(token(checked_at=None), curve(1.1), NOW, RULES)
         self.assertEqual(up['state'], 'fresh')
         t = token(**up)
-        self.assertEqual(classify(t, curve(1.2), NOW + 90, RULES)['state'], 'dead')
+        self.assertEqual(classify(t, curve(1.2), NOW + 90, RULES)['state'], 'fresh')
+        t.update(classify(t, curve(1.2), NOW + 90, RULES))
+        self.assertEqual(classify(t, curve(4), NOW + 120, RULES)['state'], 'alive')
 
     def test_growth_between_sweeps(self):
         t = token(state='alive', checks=1, checked_at=NOW - 60, real_sol=4, peak_real_sol=4)
@@ -43,15 +45,16 @@ class ReservoirTests(unittest.TestCase):
 
     def test_dump_and_stall(self):
         t = token(state='alive', checks=3, checked_at=NOW - 60, real_sol=10, peak_real_sol=10)
-        self.assertEqual(classify(t, curve(3), NOW, RULES)['reason'], 'dumped')
+        self.assertEqual(classify(t, curve(3), NOW, RULES)['reason'], 'dumped; eligible for a later recovery')
+        self.assertEqual(classify(t, curve(3), NOW, RULES)['state'], 'fresh')
         t = token(state='alive', checks=3, checked_at=NOW - 60, real_sol=5, peak_real_sol=5, stalls=4)
-        self.assertEqual(classify(t, curve(5), NOW, RULES)['reason'], 'stalled')
+        self.assertEqual(classify(t, curve(5), NOW, RULES)['reason'], 'stalled; awaiting fresh demand')
 
     def test_unusable_curves(self):
         self.assertEqual(classify(token(), curve(5, mayhem=True), NOW, RULES)['state'], 'dead')
         self.assertEqual(classify(token(), curve(5, quote=MINT), NOW, RULES)['reason'], 'non-SOL quote')
         self.assertNotIn('state', classify(token(), None, NOW, RULES))
-        self.assertEqual(classify(token(checks=2), None, NOW, RULES)['state'], 'dead')
+        self.assertNotIn('state', classify(token(checks=2), None, NOW, RULES))
 
     def test_candidates_rank_by_inflow_and_respect_blockers(self):
         fast = token(mint='fast', state='alive', real_sol=6, traction=3)
@@ -64,9 +67,9 @@ class ReservoirTests(unittest.TestCase):
         old_migration = token(mint='old', state='alive', stage='migrated', migrated_at=NOW - 3600)
         ranked = candidates([slow, crawl, fast, cooling, late, whale_dev, migrated, old_migration],
                             NOW, RULES, lambda creator: 1)
-        self.assertEqual([t['mint'] for t in ranked], ['mig', 'fast', 'slow'])
+        self.assertEqual([t['mint'] for t in ranked], ['fast', 'slow', 'mig'])
         self.assertEqual(blocker(fast, NOW, RULES, launches=9), 'serial creator')
-        self.assertEqual(blocker(token(state='alive', real_sol=6, traction=3, promotions=3), NOW, RULES, 1),
+        self.assertEqual(blocker(token(state='alive', real_sol=6, traction=3, promotions=10), NOW, RULES, 1),
                          'watched enough')
         # A reading from before the sweep stopped must not promote anything.
         self.assertEqual(blocker(token(state='alive', real_sol=6, traction=3, checked_at=NOW - 900), NOW, RULES, 1),

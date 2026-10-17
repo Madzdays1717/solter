@@ -17,18 +17,21 @@ from .chain import LAMPORTS, PUMP_SUPPLY, Curve
 
 @dataclass(frozen=True)
 class ReservoirRules:
-    first_check: float = 45          # seconds after discovery before the first look
-    recheck: float = 90              # a quiet token is looked at once more after this
+    first_check: float = 6          # seconds after discovery before the first look
+    recheck: float = 25              # a quiet token is looked at once more after this
     alive_min_sol: float = 0.5       # community SOL: real SOL minus the creator's launch buy
     promote_min_rate: float = 0.5    # SOL per minute flowing in
     promote_min_sol: float = 1.0     # community SOL
     max_stalls: int = 5              # sweeps in a row without growth before an alive token is dropped
     dump_ratio: float = .4           # real SOL below this share of its peak = dumped
-    max_promotions: int = 3
+    max_promotions: int = 10
     max_progress: float = 85.0       # percent
     max_dev_buy_pct: float = 15.0
     max_creator_launches: int = 3    # 0 = off
-    migrated_minutes: float = 15     # a migration stays a candidate this long
+    migrated_minutes: float = 1440
+    market_min_buys: int = 7
+    market_min_volume_usd: float = 650
+    market_min_liquidity_usd: float = 5000     # a migration stays a candidate this long
     stale_after: float = 300         # seconds; an older inflow reading cannot promote a token
 
 
@@ -46,8 +49,8 @@ def classify(token: dict, curve: Curve | None, now: float, rules: ReservoirRules
     checks = (token.get('checks') or 0) + 1
     up: dict = {'checks': checks, 'checked_at': now}
     if curve is None:
-        if checks >= 3:
-            up.update(state='dead', reason='curve unreadable')
+        # A temporarily unavailable RPC/curve is not proof the token is dead.
+        up['reason'] = 'curve temporarily unreadable'
         return up
     if not curve.sol_quoted:
         up.update(state='dead', reason='non-SOL quote')
@@ -74,14 +77,14 @@ def classify(token: dict, curve: Curve | None, now: float, rules: ReservoirRules
     if curve.complete:
         up.update(state='alive', reason='graduated, waiting for migration')
     elif peak_real >= rules.alive_min_sol and real < peak_real * rules.dump_ratio:
-        up.update(state='dead', reason='dumped')
+        up.update(state='fresh', reason='dumped; eligible for a later recovery')
     elif community >= rules.alive_min_sol:
         if stalls >= rules.max_stalls:
-            up.update(state='dead', reason='stalled')
+            up.update(state='fresh', reason='stalled; awaiting fresh demand')
         else:
             up['state'] = 'alive'
     elif checks >= 2:
-        up.update(state='dead', reason='no inflow')
+        up.update(state='fresh', reason='no inflow yet')
     else:
         up['state'] = 'fresh'
     return up
@@ -101,8 +104,14 @@ def blocker(token: dict, now: float, rules: ReservoirRules, launches: int) -> st
     if buy is not None and buy > rules.max_dev_buy_pct:
         return 'dev bought too much'
     if token.get('stage') == 'migrated':
-        if now - (token.get('migrated_at') or 0) > rules.migrated_minutes * 60:
-            return 'migration too old'
+        # Very recent migrations need a brief live chance even before DEX indexing.
+        # Older pools require fresh market momentum, not just age or paid boosts.
+        from .market import market_ready
+        if now - (token.get('migrated_at') or 0) <= 120:
+            return None
+        if not market_ready(token, now, rules.market_min_buys,
+                            rules.market_min_volume_usd, rules.market_min_liquidity_usd):
+            return 'market momentum missing'
         return None
     if (token.get('progress') or 0) > rules.max_progress:
         return 'late on curve'
@@ -120,8 +129,7 @@ def candidates(tokens: list[dict], now: float, rules: ReservoirRules,
                launches_of: Callable[[str | None], int]) -> list[dict]:
     """Promotable tokens: fresh migrations first, then bonding tokens by inflow rate."""
     ready = [t for t in tokens if blocker(t, now, rules, launches_of(t.get('creator'))) is None]
-    migrated = sorted((t for t in ready if t.get('stage') == 'migrated'),
-                      key=lambda t: -(t.get('migrated_at') or 0))
-    bonding = sorted((t for t in ready if t.get('stage') != 'migrated'),
-                     key=lambda t: -(t.get('traction') or 0))
-    return migrated + bonding
+    # Joint ranking: migrated tokens no longer monopolize the front of the queue.
+    from .market import market_strength
+    return sorted(ready, key=lambda t: -(market_strength(t) if t.get('stage') == 'migrated'
+                                         else (t.get('traction') or 0) * 10))

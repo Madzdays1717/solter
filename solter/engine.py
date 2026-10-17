@@ -11,6 +11,7 @@ import asyncio
 import json
 import logging
 import random
+from urllib.parse import quote
 import time
 from collections import deque
 from dataclasses import replace
@@ -28,7 +29,8 @@ from .flow import Flow, evaluate
 from .quality import Assessment, holder_stats, market_cap_reason, quality_reason, score, socials_from
 from .reservoir import candidates, classify, dev_buy_pct
 from .rpc import BACKFILL, DECISION, FALLBACK, QUOTAS, SWEEP, BoundedRPC, NoBudget
-from .sources import DEX, PUMP_WS, pair_facts, parse_portal, pumpswap_pair, sol_usd_from
+from .sources import DEX, PUMP_WS, pair_facts, parse_portal, pumpswap_pair, sol_usd_from, dex_list_mints
+from .market import GECKO, by_mint, gecko_mints, market_snapshot, market_strength, market_ready
 from .report import pulse
 from .storage import HORIZONS, Store
 from .telegram import Telegram, call_text, dev_sold_text, milestone_text
@@ -39,7 +41,7 @@ MILESTONES = (2, 3, 5, 10)
 METADATA_RETRY = 300    # a metadata fetch that failed is tried again after this
 CHECK_TTL = 45          # seconds a passing deep check is reused
 FAILED_CHECK_TTL = 120  # a failing one changes slowly (holders, dev): look again less often
-COOLDOWN = 300          # seconds before a demoted token may be watched again
+COOLDOWN = 40          # seconds before a demoted token may be watched again
 
 
 class Solter:
@@ -70,6 +72,7 @@ class Solter:
         self.last_dex = 0.0
         self.lags: deque = deque(maxlen=200)    # event timestamp minus arrival time, live trades
         self.clock_warned = 0.0
+        self.market_seen: dict[str, float] = {}
 
     def attach(self, session):
         self.session = session
@@ -82,7 +85,9 @@ class Solter:
         backoff = 2
         while self.running:
             try:
-                async with self.session.ws_connect(PUMP_WS, heartbeat=25, timeout=20,
+                portal_url = PUMP_WS + ('?api-key=' + quote(self.cfg.portal_key, safe='')
+                                          if self.cfg.portal_key else '')
+                async with self.session.ws_connect(portal_url, heartbeat=25, timeout=20,
                                                    max_msg_size=2**20) as ws:
                     LOG.info('PumpPortal connected (free launch and migration streams)')
                     self.db.metric('portal_connect')
@@ -155,12 +160,17 @@ class Solter:
             if not isinstance(values, list) or len(values) != len(chunk):
                 continue
             checked_at = time.time()
+            changes, counts = [], {}
             for token, account in zip(chunk, values):
                 updates = classify(token, curve_account(account), checked_at, self.reservoir)
-                self.db.update(token['mint'], **updates)
+                changes.append((token['mint'], updates))
                 state = updates.get('state')
                 if state and state != token['state']:
-                    self.db.metric(f'reservoir_{state}')
+                    key = f'reservoir_{state}'
+                    counts[key] = counts.get(key, 0) + 1
+            self.db.update_many(changes)
+            if counts:
+                self.db.metric_many(counts)
         return requests
 
     # live watch slots ----------------------------------------------------
@@ -179,23 +189,45 @@ class Solter:
             if now >= (t['watch_until'] or 0):
                 self.db.demote(t['mint'], now, COOLDOWN, 'watched without a call')
                 self.db.metric('watch_ended')
-            elif now - started > 90 and idle > 90:
+            elif now - started > 65 and idle > 65:
                 self.db.demote(t['mint'], now, COOLDOWN, 'flow went quiet')
                 self.db.metric('watch_quiet')
         active = self.db.watching()
         free = self.cfg.max_watch - len(active)
+        ready = candidates(self.db.alive(), now, self.reservoir, self.db.launches)
+        if free <= 0 and ready:
+            # Only replace quiet, sufficiently old watches with much stronger demand.
+            # Never interrupt a watch that has just seen real trades.
+            quiet = [t for t in active if now - (t['watch_started'] or now) >= 25
+                     and self.chain_now(now) - (t['last_trade_at'] or t['watch_started'] or now) >= 22]
+            weakest = min(quiet, key=lambda t: (t['traction'] or 0), default=None)
+            top = ready[0]
+            migrant_slots = max(1, self.cfg.max_watch * 2 // 3)
+            migrant_active = sum(1 for t in active if t['stage'] == 'migrated')
+            bonding_ready = any(t['stage'] != 'migrated' for t in ready)
+            allowed_top = (top['stage'] != 'migrated' or not bonding_ready
+                           or migrant_active < migrant_slots)
+            candidate_strength = (market_strength(top) if top['stage'] == 'migrated'
+                                  else (top.get('traction') or 0) * 10)
+            weakest_strength = (market_strength(weakest) if weakest and weakest['stage'] == 'migrated'
+                                else (weakest.get('traction') or 0) * 10 if weakest else 0)
+            if weakest and allowed_top and candidate_strength > max(4, weakest_strength * 1.8):
+                self.db.demote(weakest['mint'], now, COOLDOWN, 'preempted by stronger flow')
+                self.db.metric('watch_preempted')
+                active = self.db.watching()
+                free = self.cfg.max_watch - len(active)
         if free <= 0:
             return
-        migrated_cap = max(1, self.cfg.max_watch // 3)
+        migrated_cap = max(1, self.cfg.max_watch * 2 // 3)
         migrated = sum(1 for t in active if t['stage'] == 'migrated')
-        for t in candidates(self.db.alive(), now, self.reservoir, self.db.launches):
+        for t in ready:
             if free <= 0:
                 break
             if self.db.has_call(t['mint']):
                 self.db.update(t['mint'], state='called')
                 continue
             if t['stage'] == 'migrated':
-                if migrated >= migrated_cap:
+                if migrated >= migrated_cap and any(r['stage'] != 'migrated' for r in ready):
                     continue
                 migrated += 1
             if self.db.promote(t['mint'], now, self.cfg.watch_seconds):
@@ -488,18 +520,90 @@ class Solter:
         self.metadata[mint] = (time.time(), data)
         return data
 
+    # Older-pool discovery and market snapshots --------------------------
+    async def market_scanner(self):
+        """Free feeds complement launch events; unavailable feeds never kill other workers."""
+        while self.running:
+            started = time.monotonic()
+            try:
+                await self.scan_market(time.time())
+            except Exception:
+                LOG.exception('market discovery failed')
+                self.db.metric('market_scan_error')
+            await asyncio.sleep(max(1, self.cfg.market_scan_seconds - (time.monotonic() - started)))
+
+    async def scan_market(self, now: float):
+        discovered = []
+        if self.cfg.market_enabled:
+            # The public API is cached ~60s and limited to ~10 calls/min. One
+            # short-term trending page plus one new pool page, never rapid polling.
+            urls = (f'{GECKO}/networks/solana/trending_pools?duration=5m&include=base_token',
+                    f'{GECKO}/networks/solana/new_pools?include=base_token')
+            for url in urls:
+                data = await self.http_json(url)
+                if data is None:
+                    self.db.metric('market_gecko_unavailable')
+                discovered.extend(gecko_mints(data))
+            # Paid listings are discovery ONLY; no boosts/socials receive score credit.
+            # On-chain flow and holder checks remain mandatory before any call.
+            for endpoint in ('/token-profiles/latest/v1', '/token-boosts/top/v1'):
+                discovered.extend(dex_list_mints(await self.dex(endpoint)))
+        # Sample known migration inventory fairly: tokens are least-recently-checked
+        # first, not perpetually the highest-volume tokens in the DB.
+        discovered.extend(self.db.market_candidates(90))
+        mints = list(dict.fromkeys(discovered))
+        if not mints:
+            return
+        # Bound per-cycle HTTP cost; public DEX endpoint supports up to 30 tokens.
+        # Known candidates are re-sampled in subsequent cycles rather than discarded.
+        mints = mints[:120]
+        for offset in range(0, len(mints), 30):
+            batch = mints[offset:offset + 30]
+            payload = await self.dex('/tokens/v1/solana/' + ','.join(batch))
+            if payload is None:
+                self.db.metric('market_dex_unavailable')
+                continue
+            pairs = by_mint(payload, set(batch))
+            for mint, pair in pairs.items():
+                try:
+                    pool = pair['pairAddress']
+                    # An alternative PumpSwap pool can be legitimate. Do not
+                    # silently lose it: pool_account() verifies the pool's owner,
+                    # base/quote mint and vault before a call is allowed.
+                    if migration_pool(mint) != pool:
+                        self.db.metric('market_noncanonical_pool')
+                    snapshot = market_snapshot(pair, now)
+                    if not snapshot:
+                        continue
+                    eligible = market_ready(snapshot, now, self.cfg.market_min_buys,
+                                            self.cfg.market_min_volume_usd,
+                                            self.cfg.min_liquidity_usd)
+                    created = self.db.update_market(mint, pool, snapshot, now, eligible)
+                    if created:
+                        self.db.metric('market_discovered')
+                    else:
+                        self.db.metric('market_updated')
+                except (TypeError, ValueError):
+                    self.db.metric('market_bad_pair')
+
     # evaluation ----------------------------------------------------------
     async def evaluator(self):
         while self.running:
-            for token in self.db.watching():
-                try:
-                    await self.consider(token, self.chain_now())
-                except NoBudget:
-                    LOG.warning('RPC budget used up; deep checks wait for tomorrow (UTC)')
-                    break
-                except Exception:
-                    LOG.exception('evaluation failed for %s', token['mint'][:12])
-            await asyncio.sleep(4)
+            tokens = self.db.watching()
+            limiter = asyncio.Semaphore(4)
+
+            async def one(token):
+                async with limiter:
+                    try:
+                        await self.consider(token, self.chain_now())
+                    except NoBudget:
+                        self.db.metric('evaluation_no_budget')
+                    except Exception:
+                        LOG.exception('evaluation failed for %s', token['mint'][:12])
+
+            if tokens:
+                await asyncio.gather(*(one(t) for t in tokens))
+            await asyncio.sleep(1)
 
     def note(self, mint: str, reason: str):
         """Remember why a watched token was not called (once per change of reason)."""
@@ -556,7 +660,8 @@ class Solter:
 
     async def deep_check(self, token: dict, trades: list[Trade]) -> Assessment:
         mint = token['mint']
-        mint_info = await self.account(mint, 'jsonParsed')
+        mint_info, market_info = await asyncio.gather(
+            self.account(mint, 'jsonParsed'), self.account(token['account'], 'base64'))
         safe, note = mint_safety(mint_info)
         if self.cfg.require_mint_check and not safe:
             return Assessment(note)
@@ -564,7 +669,7 @@ class Solter:
         supply = mint_supply(mint_info) or PUMP_SUPPLY * TOKEN_UNIT
         creator, liquidity, image, progress = token['creator'], None, None, None
         if token['stage'] == 'migrated':
-            pool = pool_account(await self.account(token['account'], 'base64'))
+            pool = pool_account(market_info)
             if not pool or pool.base_mint != mint or pool.quote_mint != WSOL:
                 facts = await self.pair(mint)
                 if facts.get('address') and facts['address'] != token['account']:
@@ -583,7 +688,7 @@ class Solter:
             creator = creator or pool.coin_creator
             vault = pool.base_vault
         else:
-            curve = curve_account(await self.account(token['account'], 'base64'))
+            curve = curve_account(market_info)
             if not curve:
                 return Assessment('curve unreadable')
             if curve.complete:
@@ -604,15 +709,22 @@ class Solter:
             vault = associated_account(token['account'], mint, token_program)
         if not price:
             return Assessment('price unknown')
-        largest = await self.rpc.call('getTokenLargestAccounts', [mint, {'commitment': 'confirmed'}],
-                                      kind=DECISION)
+        tasks = [self.rpc.call('getTokenLargestAccounts', [mint, {'commitment': 'confirmed'}],
+                               kind=DECISION)]
+        if creator:
+            tasks.append(self.dev_balance(creator, mint))
+        # Metadata is not a safety check: a stalled IPFS gateway must not delay a call.
+        tasks.append(asyncio.wait_for(self.token_metadata(token), timeout=2.5))
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        largest = results[0] if isinstance(results[0], dict) else None
         rows = largest.get('value') if isinstance(largest, dict) else None
         if not isinstance(rows, list):
             return Assessment('holders unavailable')
-        dev_raw = await self.dev_balance(creator, mint) if creator else None
+        dev_raw = results[1] if creator and isinstance(results[1], int) else None
         holders = holder_stats(rows, {vault}, supply, dev_raw)
         launches = self.db.launches(creator)
-        socials = socials_from(await self.token_metadata(token))
+        meta = results[-1] if isinstance(results[-1], dict) else None
+        socials = socials_from(meta)
         dev_buy = dev_buy_pct(token)
         reason = quality_reason(self.quality, holders, socials, launches, dev_buy)
         return Assessment(reason, price, mcap, progress, holders, socials, launches, dev_buy, 0,
@@ -751,6 +863,8 @@ class Solter:
                      __version__, self.cfg.max_watch, self.cfg.rpc_per_day, self.cfg.rpc_per_minute)
             workers = (self.discover, self.sweep, self.scheduler, self.logs, self.transactions,
                        self.backfill, self.sol_price, self.evaluator, self.tracker, self.maintenance)
+            if self.cfg.market_enabled:
+                workers += (self.market_scanner,)
             jobs = [asyncio.create_task(self.supervise(w.__name__, w)) for w in workers]
             try:
                 await asyncio.gather(*jobs)
@@ -803,7 +917,9 @@ async def probe(cfg: Config, store: Store, samples: int = 5) -> dict:
         sol = sol_usd_from(await _json(session, f'{DEX}/tokens/v1/solana/{WSOL}'))
         out['sol_usd_dexscreener'] = sol
         try:
-            async with session.ws_connect(PUMP_WS, timeout=15) as ws:
+            portal_url = PUMP_WS + ('?api-key=' + quote(cfg.portal_key, safe='')
+                                      if cfg.portal_key else '')
+            async with session.ws_connect(portal_url, timeout=15) as ws:
                 await ws.send_json({'method': 'subscribeNewToken'})
                 launch = None
                 deadline = time.time() + 30

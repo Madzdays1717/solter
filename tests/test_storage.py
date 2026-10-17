@@ -29,14 +29,15 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(self.db.launches(CREATOR), 2)
         self.assertEqual(self.db.launches(None), 0)
 
-    def test_sweep_batch_prefers_alive_then_newest(self):
+    def test_sweep_batch_checks_newest_and_overdue_and_alive(self):
         self.add(mint=addr('old'), ago=300)
         self.add(mint=addr('new'), ago=60)
         self.add(mint=addr('baby'), ago=5)                  # too young for a first look
         self.add(mint=addr('hot'), ago=400)
         self.db.update(addr('hot'), state='alive', traction=5, checks=1)
         batch = [t['mint'] for t in self.db.sweep_batch(self.now, 10, 45, 90)]
-        self.assertEqual(batch, [addr('hot'), addr('new'), addr('old')])
+        self.assertEqual(set(batch), {addr('hot'), addr('new'), addr('old')})
+        self.assertEqual(batch[0], addr('new'))  # New discoveries are not starved by older hot ones
 
     def test_watch_cycle(self):
         self.add()
@@ -98,8 +99,9 @@ class StorageTests(unittest.TestCase):
         self.add(mint=addr('runner'), ago=600)
         self.db.update(addr('runner'), checks=2, state='alive', first_mcap_sol=40, peak_mcap_sol=200,
                        reason='few buyers')
-        self.assertEqual(self.db.expire(self.now, 60), 2)
-        self.assertEqual(self.db.token(addr('unchecked'))['reason'], 'not checked in time')
+        self.assertEqual(self.db.expire(self.now, 60), 1)
+        # A launch with zero checks is not discarded after only 10 minutes.
+        self.assertEqual(self.db.token(addr('unchecked'))['state'], 'fresh')
         missed = self.db.missed(self.now - 86400, 3)
         self.assertEqual([m['mint'] for m in missed], [addr('runner')])
 

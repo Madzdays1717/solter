@@ -240,7 +240,8 @@ class EngineTests(unittest.TestCase):
     def test_sweep_interval_respects_the_budget(self):
         self.assertEqual(self.bot.sweep_interval(1), 30)
         small = Solter(Config(rpc_per_day=1800), self.db)
-        self.assertAlmostEqual(small.sweep_interval(1), 86400 / (1800 * .45))
+        from solter.rpc import QUOTAS, SWEEP
+        self.assertAlmostEqual(small.sweep_interval(1), 86400 / (1800 * QUOTAS[SWEEP]))
         self.assertAlmostEqual(small.reservoir.stale_after, 3 * small.sweep_interval(2))
         self.assertEqual(self.bot.reservoir.stale_after, 300)
 

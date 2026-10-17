@@ -1,15 +1,55 @@
-# Solter v2: caller memecoin awal, 100% sumber gratis
+# Solter v2.2.0: scanner scalping momentum Solana (sumber publik/gratis)
 
-Solter memantau setiap token baru Pump.fun, memilih yang uang masuknya paling cepat, membaca
-trade-nya langsung dari log Solana, lalu mengirim **satu** call Telegram hanya jika aliran beli
-nyata (dalam SOL), distribusi holder, dev, creator, dan kontraknya lolos. Setiap call dilacak
+Solter menggabungkan **launch baru, migrasi, dan token PumpSwap yang sudah lama tetapi
+mulai ramai lagi**. Kandidat diurutkan berdasarkan momentum dan dipantau menggunakan log
+Solana sebelum menerima **satu** call Telegram. Volume DEX adalah penyaring awal;
+call tetap memerlukan bukti aliran pembelian on-chain, distribusi holder, dev, dan
+pemeriksaan kontrak. Setiap call dilacak
 60 menit (2x/3x/5x/10x, dev jual) supaya kualitas filter bisa dibuktikan dan disetel.
 
-- **Gratis**: PumpPortal (launch & migrasi), RPC Solana publik/free tier, DexScreener, metadata IPFS.
-  Tanpa langganan, tanpa API key wajib.
+- **Sumber publik/gratis**: PumpPortal (launch/migrasi), GeckoTerminal (trending/new pools),
+  DexScreener (batch transaksi 5 menit), RPC Solana, metadata IPFS. Batas dan ketersediaan
+  tiap penyedia dapat berubah; PumpPortal mungkin memerlukan *data API key*, meski dua
+  stream launch/migrasi tercatat gratis. Tidak memakai stream trade PumpPortal berbayar.
 - **Tidak ada trading otomatis** dan tidak ada private key.
-- **Bukan jaminan profit.** Baca [docs/ANALISIS.md](docs/ANALISIS.md) untuk alasan setiap
+- **Tidak bisa menjamin semua token tertangkap atau profit.** API publik memerlukan waktu indeks,
+  koneksi putus bisa menghilangkan event, dan volume bisa direkayasa. Baca [docs/ANALISIS.md](docs/ANALISIS.md) untuk alasan setiap
   filter dan batasannya.
+
+## Perubahan penting v2.2.0 — mode momentum-first
+
+- Token berusia **jam/hari** dapat muncul ketika volume 5 menit, frekuensi pembelian,
+  rasio buy/sell, likuiditas dan momentum kembali hidup. Tidak ada filter usia maksimum
+  untuk token yang ditemukan ulang di DEX.
+- GeckoTerminal `trending_pools?duration=5m` dan `new_pools` dipindai kurang lebih setiap
+  65 detik. DexScreener profil & boost hanya menambah daftar kandidat, **bukan**
+  dianggap penanda kualitas; data dari feed gratis ini bisa tertunda.
+- DexScreener `/tokens/v1/solana/` menerima batch maksimal 30 mint/request; token yang
+  diperhatikan ulang diputar secara adil. 5m: default minimal 7 pembelian, $650 volume,
+  buyer pressure 1,2× terhadap sell count, tidak turun lebih dari 5%, likuiditas $5K.
+  Angka ini mengatur slot watch; belum menjadi izin call.
+- Call tetap menunggu transaksi Solana nyata dalam jendela 3 menit, holder distribution,
+  mint safety dan verifikasi pool PumpSwap. Flow yang tidak sehat tidak dikirim.
+- `CALL_MODE=cepat` aktif secara default pada `.env.example`, maksimal 12 watch,
+  12 call/jam sebagai plafon **bukan target**. Tidak akan memaksakan call bila sinyal nihil.
+- Pemeriksaan awal launch 6 detik; token sepi tidak langsung diberi state mati permanen,
+  sweep bergilir membagi pemeriksaan token baru/tertunda dan yang hidup.
+- Concurrent evaluator maksimal 4, batch update SQLite untuk mengurangi disk sync Termux.
+- Schema SQLite lama dimigrasikan otomatis dengan `ALTER TABLE`; histori call tetap tersimpan.
+
+**Upgrade tanpa kehilangan token Telegram:** hentikan proses lama, backup `.env` dan folder
+`data/`, perbarui kode. Jangan menimpa `.env` berisi secret. Sesuaikan baris
+`CALL_MODE=cepat`, `MAX_ACTIVE_TOKENS=12`, `MAX_CALLS_PER_HOUR=12`,
+`RESERVOIR_MINUTES=720`, `MARKET_ENABLED=true` pada `.env` lama. Jika ada
+`MIN_MCAP_USD`, `MAX_MCAP_USD`, `MAX_CREATOR_LAUNCHES` override lama yang terlalu
+ketat, cek ulang sesuai risiko. `python bot.py doctor` menampilkan config efektif
+(tanpa secret), `python bot.py stats` menampilkan metrik discovery, RPC, dan call.
+
+**Batas penting:** tidak semua token DEX termasuk PumpSwap. Token Raydium lain tidak
+akan diproses oleh decoder PumpSwap. Data GeckoTerminal dapat tersimpan ~1 menit;
+API DexScreener/GeckoTerminal bukan firehose seluruh transaksi. Koneksi RPC publik
+bisa menolak subscription. Angka ini adalah default heuristik, **belum dikalibrasi
+pada PnL riil**. Amati `report` sebelum menambah modal.
 
 ## Apa yang baru di v2
 
@@ -21,7 +61,10 @@ nyata (dalam SOL), distribusi holder, dev, creator, dan kontraknya lolos. Setiap
 | Harga | Wajib DexScreener (telat) | On-chain dari reserve bonding curve |
 | Anti-rug | Mint authority, dev jual | + top-10 holder, holder terbesar, saldo dev, buy awal dev, serial creator, sosial |
 | Hasil | Tidak diukur | 5/15/30/60 mnt, puncak, drawdown, laporan per grade, token terlewat |
-| Migrasi | Tunggu DexScreener | Alamat pool PumpSwap diturunkan sendiri |
+| Migrasi | Tunggu DexScreener | Alamat pool PumpSwap dari event/DEX dan diverifikasi on-chain |
+| Token lama aktif lagi | Tidak dicakup | Trending/new pools + profil/boost hanya untuk discovery, 5m buy/sell/volume untuk shortlist |
+| Lonjakan tiba-tiba | Antrean bisa macet | Sweep adil dan preemption slot yang sepi; 12 slot default |
+| Kandidat sepi | Cepat dianggap mati | Retest dan peluang reaktivasi saat momentum muncul |
 
 ## Instalasi (Termux)
 
@@ -106,17 +149,19 @@ dev menjual setelah call (`FOLLOWUP_ALERTS=false` untuk mematikan).
 
 ## RPC gratis dan budget
 
-Default memakai RPC publik `api.mainnet-beta.solana.com` (gratis, tanpa daftar). Untuk koneksi
-yang lebih stabil, pakai endpoint free tier milik Anda sendiri (HTTPS + WSS) di `.env`.
+Default memakai RPC publik `api.mainnet-beta.solana.com`. Batas WSS dan RPC pada provider
+publik dapat menyebabkan subscription ditolak; untuk 12 slot dan uptime lebih konsisten,
+gunakan RPC free tier yang mendukung `logsSubscribe`, HTTPS serta WSS dari provider yang sama.
+Biaya bergantung pada penyedia. Pantau metrik `ws_subscription_refused` dan `sweep_paused`.
 
 Solter menjaga batasnya sendiri: `RPC_REQUESTS_PER_MIN` (default 60) dan
 `RPC_REQUESTS_PER_DAY` (default 15.000, reset 00:00 UTC = 07:00 WIB). Setiap jenis kerja punya
 jatah yang dicadangkan:
 
-- sweep reservoir (mencari token yang mulai ramai): 45%, intervalnya otomatis melambat jika budget kecil
-- cek mendalam sebelum call dan pelacakan: 25%
-- backfill trade saat token mulai dipantau: 15%
-- fallback transaksi: 15%
+- sweep reservoir: 62% (lebih banyak launch bisa diperiksa)
+- cek mendalam dan pelacakan: 18%
+- backfill trade saat slot mulai dipantau: 15%
+- fallback transaksi: 5%
 
 Satu jenis kerja boleh memakai lebih dari jatahnya hanya dari sisa yang tidak lagi dibutuhkan jenis
 lain untuk sisa hari itu. Jadi backfill atau fallback tidak bisa menghabiskan jatah sweep, dan

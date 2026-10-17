@@ -76,3 +76,25 @@ creator 7 hari, call dan hasilnya disimpan permanen (kecil) untuk laporan.
 pemalsuan log), PDA terhadap alamat mainnet yang dikenal, gerbang flow/kualitas, reservoir,
 penyimpanan, engine end-to-end dengan RPC/Telegram/WebSocket palsu, budget, laporan, konfigurasi.
 Asumsi live dicek dengan `python bot.py probe`.
+
+
+## Momentum-first discovery (v2.2.0)
+
+Pipeline A: PumpPortal free launch/migration -> SQLite reservoir -> curve sweeps
+(`getMultipleAccounts`) -> live watch. Age is not a score, and stalled candidates can
+be rechecked. Recent migrated tokens can enter live-watch immediately.
+
+Pipeline B: public GeckoTerminal trending5m/newpools plus DexScreener latest profiles/
+boosted tokens (discovery ONLY) -> deduplicate mint -> DexScreener 30-mint batch
+5m transaction/volume/price/liquidity -> persistent candidate -> live RPC logs.
+Old candidates, including expired ones, can be reactivated only on fresh activity.
+Never use paid boosts as a confidence score. Only PumpSwap pools go into this engine;
+noncanonical ones must pass on-chain verification during deep check.
+
+Both join at live log-derived Flow, and only flow which passes contract/holder/pool
+safety checks is called once per mint. Ordinary DEX snapshots cannot prove unique
+buyers or absence of wash trading; these require decoded on-chain events.
+
+A public API or websocket outage may lose coverage. Provider limits, scanning throughput,
+GeckoTerminal caching and the narrow supported DEX family mean completeness is impossible.
+Monitor the per-stage metrics and run `probe` manually after changing providers.
