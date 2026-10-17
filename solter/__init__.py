@@ -1,1 +1,3 @@
-__version__ = "2.5.0"
+"""Solter: focused, free Solana market-momentum alerts."""
+
+__version__ = "3.0.0"
