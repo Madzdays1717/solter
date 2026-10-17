@@ -38,6 +38,9 @@ MILESTONES = (2, 3, 5, 10)
 METADATA_RETRY = 300    # a metadata fetch that failed is tried again after this
 CHECK_TTL = 45          # seconds a passing deep check is reused
 FAILED_CHECK_TTL = 120  # a failing one changes slowly (holders, dev): look again less often
+TRANSIENT_CHECKS = {'holders unavailable', 'curve unreadable', 'pool unverified',
+                    'price unknown', 'mint unavailable', 'thin liquidity'}
+TRANSIENT_CHECK_TTL = 10
 COOLDOWN = 300          # seconds before a demoted token may be watched again
 
 
@@ -69,11 +72,13 @@ class Solter:
         self.last_dex = 0.0
         self.lags: deque = deque(maxlen=200)    # event timestamp minus arrival time, live trades
         self.clock_warned = 0.0
+        self.eval_jobs = {}
+        self.prefetched = set()
 
     def attach(self, session):
         self.session = session
         self.rpc = BoundedRPC(self.cfg.rpc_http, self.db, self.cfg.rpc_per_minute,
-                              self.cfg.rpc_per_day, session)
+                              self.cfg.rpc_per_day, session, self.cfg.rpc_fallback)
         self.tg = Telegram(self.cfg.tg_token, self.cfg.tg_chat, session)
 
     # discovery -----------------------------------------------------------
@@ -177,7 +182,7 @@ class Solter:
             if now >= (t['watch_until'] or 0):
                 self.db.demote(t['mint'], now, COOLDOWN, 'watched without a call')
                 self.db.metric('watch_ended')
-            elif now - started > 90 and idle > 90:
+            elif now - started > self.cfg.quiet_seconds and idle > self.cfg.quiet_seconds:
                 self.db.demote(t['mint'], now, COOLDOWN, 'flow went quiet')
                 self.db.metric('watch_quiet')
         active = self.db.watching()
@@ -487,17 +492,47 @@ class Solter:
         return data
 
     # evaluation ----------------------------------------------------------
+    async def evaluate_one(self, token):
+        started = time.monotonic()
+        try:
+            await self.consider(token, self.chain_now())
+        except NoBudget:
+            self.note(token['mint'], 'RPC budget waiting')
+        except Exception:
+            LOG.exception('evaluation failed for %s', token['mint'][:12])
+        finally:
+            elapsed = time.monotonic() - started
+            if elapsed >= 2:
+                LOG.info('CHECK %s duration=%.1fs reason=%s', token['mint'][:12],
+                         elapsed, self.reasons.get(token['mint'], 'completed'))
+
     async def evaluator(self):
-        while self.running:
-            for token in self.db.watching():
-                try:
-                    await self.consider(token, self.chain_now())
-                except NoBudget:
-                    LOG.warning('RPC budget used up; deep checks wait for tomorrow (UTC)')
-                    break
-                except Exception:
-                    LOG.exception('evaluation failed for %s', token['mint'][:12])
-            await asyncio.sleep(4)
+        # No batch barrier: a slow request occupies only one worker slot.
+        last = {}
+        try:
+            while self.running:
+                for mint, job in list(self.eval_jobs.items()):
+                    if job.done():
+                        job.result()
+                        del self.eval_jobs[mint]
+                tokens = sorted(self.db.watching(), key=lambda t: last.get(t['mint'], 0))
+                active = {t['mint'] for t in tokens}
+                last = {m: v for m, v in last.items() if m in active}
+                self.prefetched.intersection_update(active | set(self.eval_jobs))
+                for token in tokens:
+                    if len(self.eval_jobs) >= self.cfg.eval_concurrency:
+                        break
+                    mint = token['mint']
+                    if mint in self.eval_jobs or time.monotonic() - last.get(mint, -10) < 2:
+                        continue
+                    last[mint] = time.monotonic()
+                    self.eval_jobs[mint] = asyncio.create_task(self.evaluate_one(token))
+                await asyncio.sleep(.5)
+        finally:
+            for job in self.eval_jobs.values():
+                job.cancel()
+            await asyncio.gather(*self.eval_jobs.values(), return_exceptions=True)
+            self.eval_jobs.clear()
 
     def note(self, mint: str, reason: str):
         """Remember why a watched token was not called (once per change of reason)."""
@@ -505,6 +540,7 @@ class Solter:
             self.reasons[mint] = reason
             self.db.metric(f'no_call:{reason}')
             self.db.update(mint, reason=reason)
+            LOG.info('WAIT %s reason=%s', mint[:12], reason)
 
     async def consider(self, token: dict, now: float):
         mint = token['mint']
@@ -514,11 +550,35 @@ class Solter:
         flow = evaluate(trades, now, self.rules, token['creator'])
         if not flow.ok:
             self.note(mint, flow.reason)
+            # One speculative check per watch session, only on emerging buying.
+            # This avoids spending the daily budget on every inactive token.
+            if (mint not in self.prefetched and flow.buys >= 4 and flow.buyers >= 3
+                    and flow.net_sol > 0 and not flow.creator_sold
+                    and flow.reason in ('few buys', 'few buyers', 'weak net inflow', 'too short')):
+                self.prefetched.add(mint)
+                await self.assess(token, flow, trades, now)
+                self.db.metric('quality_prefetch')
             return
+        context = (token['stage'], token['account'])
         assessment = await self.assess(token, flow, trades, now)
         if assessment.reason:
             self.note(mint, assessment.reason)
             return
+        # RPC may have taken seconds: never send from the old flow snapshot.
+        token = self.db.token(mint)
+        if not token or token['state'] != 'watching' or self.db.has_call(mint):
+            return
+        if context != (token['stage'], token['account']):
+            self.checked.pop(mint, None)
+            self.note(mint, 'market changed; rechecking')
+            return
+        now = self.chain_now()
+        flow = evaluate(self.db.trades(mint), now, self.rules, token['creator'])
+        if not flow.ok:
+            self.note(mint, flow.reason)
+            return
+        assessment = replace(assessment, score=score(flow, assessment.holders,
+                                                     assessment.socials, assessment.launches))
         if assessment.score < self.quality.min_score:
             self.note(mint, 'low score')
             return
@@ -526,11 +586,16 @@ class Solter:
 
     async def assess(self, token: dict, flow: Flow, trades: list[Trade], now: float) -> Assessment:
         cached = self.checked.get(token['mint'])
-        if cached and now - cached[0] < (FAILED_CHECK_TTL if cached[1].reason else CHECK_TTL):
+        context = (token['stage'], token['account'])
+        if cached and (len(cached) < 3 or cached[2] != context):
+            cached = None
+        ttl = (TRANSIENT_CHECK_TTL if cached and cached[1].reason in TRANSIENT_CHECKS
+               else FAILED_CHECK_TTL if cached and cached[1].reason else CHECK_TTL)
+        if cached and now - cached[0] < ttl:
             base = cached[1]
         else:
             base = await self.deep_check(token, trades)
-            self.checked[token['mint']] = (now, base)
+            self.checked[token['mint']] = (now, base, context)
         if base.reason:
             return base
         return replace(base, score=score(flow, base.holders, base.socials, base.launches))
@@ -544,6 +609,8 @@ class Solter:
     async def deep_check(self, token: dict, trades: list[Trade]) -> Assessment:
         mint = token['mint']
         mint_info = await self.account(mint, 'jsonParsed')
+        if mint_info is None:
+            return Assessment('mint unavailable')
         safe, note = mint_safety(mint_info)
         if self.cfg.require_mint_check and not safe:
             return Assessment(note)
@@ -594,7 +661,7 @@ class Solter:
         largest = await self.rpc.call('getTokenLargestAccounts', [mint, {'commitment': 'confirmed'}],
                                       kind=DECISION)
         rows = largest.get('value') if isinstance(largest, dict) else None
-        if not isinstance(rows, list):
+        if not isinstance(rows, list) or not rows:
             return Assessment('holders unavailable')
         dev_raw = await self.dev_balance(creator, mint) if creator else None
         holders = holder_stats(rows, {vault}, supply, dev_raw)

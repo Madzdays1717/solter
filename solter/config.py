@@ -30,7 +30,10 @@ class Config:
     alive_min_sol: float = 0.5
     promote_min_rate: float = 0.5
     promote_min_sol: float = 1.0
-    max_watch: int = 8
+    max_watch: int = 16
+    eval_concurrency: int = 3
+    quiet_seconds: int = 60
+    rpc_fallback: str = ''
     watch_seconds: int = 300
     backfill_tx: int = 3
     # Flow gates
@@ -108,13 +111,16 @@ class Config:
             ws = http.replace('https://', 'wss://', 1) if http != cls.rpc_http else cls.rpc_ws
         if not (http.startswith('https://') and ws.startswith('wss://')):
             raise ValueError('RPC endpoints must use HTTPS and WSS')
-        return cls(tg_token=str(env.get('TELEGRAM_BOT_TOKEN', '')).strip(),
+        fallback = str(env.get('SOLANA_RPC_FALLBACK_URL', '')).strip()
+        if fallback and not fallback.startswith('https://'):
+            raise ValueError('Fallback RPC must use HTTPS')
+        return cls(rpc_fallback=fallback, tg_token=str(env.get('TELEGRAM_BOT_TOKEN', '')).strip(),
                    tg_chat=str(env.get('TELEGRAM_CHAT_ID', '')).strip(),
                    rpc_http=http, rpc_ws=ws, **values)
 
     def public(self) -> dict:
         """Settings safe to print: no token, no chat id, no RPC query string (API keys)."""
-        hidden = {'tg_token', 'tg_chat', 'db_path'}
+        hidden = {'tg_token', 'tg_chat', 'db_path', 'rpc_fallback'}
         out = {f.name: getattr(self, f.name) for f in fields(self) if f.name not in hidden}
         out['rpc_http'] = self.rpc_http.split('?')[0]
         out['rpc_ws'] = self.rpc_ws.split('?')[0]
@@ -124,6 +130,8 @@ class Config:
 
 # field -> (environment variable, minimum, maximum); booleans ignore the bounds.
 ENV = {
+    'eval_concurrency': ('EVAL_CONCURRENCY', 1, 8),
+    'quiet_seconds': ('QUIET_SECONDS', 30, 300),
     'rpc_per_minute': ('RPC_REQUESTS_PER_MIN', 1, 600),
     'rpc_per_day': ('RPC_REQUESTS_PER_DAY', 100, 1_000_000),
     'dex_interval': ('DEX_SECONDS_BETWEEN', .2, 30),

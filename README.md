@@ -1,3 +1,7 @@
+# Update v2.0.2
+
+Lihat [panduan upgrade](UPGRADE-v2.0.2.md) untuk perubahan terbaru dan pengaturan .env lama.
+
 # Solter v2: caller memecoin awal, 100% sumber gratis
 
 Solter memantau setiap token baru Pump.fun, memilih yang uang masuknya paling cepat, membaca

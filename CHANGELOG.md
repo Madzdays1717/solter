@@ -1,3 +1,7 @@
+# v2.0.2
+
+Evaluasi paralel terbatas, cache kegagalan sementara 10 detik, prefetch kandidat aktif, pemeriksaan momentum ulang setelah RPC, retry/fallback HTTP opsional, log penolakan/durasi, default 16 slot dan quiet rotation 60 detik. Lihat UPGRADE-v2.0.2.md.
+
 # Changelog
 
 ## v2.0.1 (2026-10-17): perbaikan hasil audit "call tidak datang"

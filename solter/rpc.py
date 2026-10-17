@@ -41,8 +41,9 @@ def allowed(kind: str, used: dict, per_day: int, left: float) -> bool:
 
 
 class BoundedRPC:
-    def __init__(self, url: str, store, per_minute: int, per_day: int, session):
+    def __init__(self, url: str, store, per_minute: int, per_day: int, session, fallback_url: str = ''):
         self.url = url
+        self.fallback_url = fallback_url
         self.store = store
         self.per_minute = per_minute
         self.per_day = per_day
@@ -68,7 +69,7 @@ class BoundedRPC:
         for attempt in range(2):
             await self._take(kind)
             try:
-                async with self.session.post(self.url, json={'jsonrpc': '2.0', 'id': 1,
+                async with self.session.post(self.fallback_url if attempt and self.fallback_url else self.url, json={'jsonrpc': '2.0', 'id': 1,
                                                               'method': method, 'params': params},
                                              timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     if resp.status == 429:
@@ -77,6 +78,10 @@ class BoundedRPC:
                             await asyncio.sleep(3)
                             continue
                         return None
+                    if resp.status >= 500 and attempt == 0:
+                        self.store.metric('rpc_server_retry')
+                        await asyncio.sleep(1)
+                        continue
                     if resp.status >= 400:
                         LOG.warning('RPC HTTP %s on %s', resp.status, method)
                         return None
@@ -84,7 +89,13 @@ class BoundedRPC:
                     if not isinstance(body, dict):
                         return None
                     if body.get('error'):
-                        LOG.warning('RPC %s error %s', method, str(body['error'])[:160])
+                        error = body['error']
+                        code = error.get('code') if isinstance(error, dict) else None
+                        LOG.warning('RPC %s error code=%s', method, code)
+                        self.store.metric('rpc_error:' + method)
+                        if attempt == 0 and (self.fallback_url or code in (-32005, -32004, -32009)):
+                            await asyncio.sleep(1)
+                            continue
                         return None
                     self.failures = 0
                     return body.get('result')
