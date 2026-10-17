@@ -12,7 +12,7 @@ from solter.config import Config
 from solter.engine import Solter
 from solter.market_media import (combine_media, extract_profile_media, public_https)
 from solter.storage import Store
-from solter.telegram import Telegram, links, market_alert_text
+from solter.telegram import Telegram, links, market_alert_text, milestone_text, dev_sold_text
 from test_market_only import FakeTelegram, dex_pair
 
 
@@ -117,6 +117,79 @@ class BannerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await self.bot.market_batch([MINT])
         self.assertEqual(len(self.bot.tg.sent), 1)
         self.assertIsNone(self.bot.tg.sent[0][2])
+
+
+class MilestoneVisualTests(unittest.TestCase):
+    def test_market_milestone_professional_without_invented_safety_or_mcap(self):
+        msg = milestone_text('<X&Y>', 2.43, None, 150.0, 7.5,
+                             threshold=2, entry_price_sol=.000001,
+                             peak_price_sol=.00000243, market_unverified=True, mint=MINT)
+        self.assertIn('MILESTONE 2×', msg)
+        self.assertIn('2.43×', msg)
+        self.assertIn('+143.0%', msg)
+        self.assertIn('7 mnt</b> sejak alert', msg)
+        self.assertIn('Saat alert', msg)
+        self.assertIn('Puncak terpantau', msg)
+        self.assertIn('BELUM DIVERIFIKASI ON-CHAIN', msg)
+        self.assertIn(f'<code>{MINT}</code>', msg)
+        self.assertIn('&lt;X&amp;Y&gt;', msg)
+        self.assertNotIn('MC puncak', msg)
+        self.assertNotIn('Grade A', msg)
+        self.assertLess(len(html.unescape(msg)), 1024)
+
+    def test_chain_milestone_peak_and_risk_message(self):
+        msg = milestone_text('SAFE', 10.9, 90.0, 140.0, 18,
+                             threshold=10, entry_price_sol=.000003,
+                             peak_price_sol=.0000327, mint=MINT)
+        self.assertIn('MILESTONE 10×', msg)
+        self.assertIn('10.90×', msg)
+        self.assertIn('+990.0%', msg)
+        self.assertIn('MC puncak estimasi', msg)
+        self.assertIn('sejak call', msg)
+        self.assertIn('keamanan dapat berubah', msg)
+
+    def test_dev_warning_is_not_rugpull_accusation(self):
+        msg = dev_sold_text('<S&>', MINT)
+        self.assertIn('PERINGATAN CREATOR', msg)
+        self.assertIn('Dev/creator', msg)
+        self.assertIn('bukan bukti pasti rug pull', msg)
+        self.assertIn('&lt;S&amp;&gt;', msg)
+        self.assertIn(f'<code>{MINT}</code>', msg)
+
+
+class FollowupDeliveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_buttons_and_reply_to_original_alert(self):
+        tg = Telegram('token', 'chat', None)
+        calls = []
+        async def send(method, payload):
+            calls.append((method, payload))
+            return 'sent', 10
+        tg.send = send
+        state = await tg.reply('2x', 42, mint=MINT)
+        self.assertEqual(state, 'sent')
+        self.assertEqual(len(calls), 1)
+        payload = calls[0][1]
+        self.assertEqual(json.loads(payload['reply_parameters'])['message_id'], 42)
+        buttons = json.loads(payload['reply_markup'])['inline_keyboard']
+        self.assertTrue(any('gmgn.ai' in b['url'] for row in buttons for b in row))
+
+    async def test_missing_parent_falls_back_without_retrying_uncertain_delivery(self):
+        tg = Telegram('token', 'chat', None)
+        calls = []
+        async def send(method, payload):
+            calls.append(dict(payload))
+            return ('rejected' if len(calls) == 1 else 'sent'), None
+        tg.send = send
+        self.assertEqual(await tg.reply('2x', 7, mint=MINT), 'sent')
+        self.assertIn('reply_parameters', calls[0])
+        self.assertNotIn('reply_parameters', calls[1])
+        calls.clear()
+        async def timeout(method, payload):
+            calls.append(dict(payload))
+            return 'uncertain', None
+        tg.send = timeout
+        self.assertEqual(await tg.reply('2x', 7, mint=MINT), 'uncertain')
+        self.assertEqual(len(calls), 1)
 
 
 if __name__ == '__main__':

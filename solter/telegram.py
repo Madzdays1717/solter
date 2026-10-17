@@ -133,13 +133,52 @@ def market_alert_text(token: dict, strength: int, now: float,
 
 
 def milestone_text(symbol: str, multiple: float, mcap_sol: float | None, sol_usd: float | None,
-                   minutes: float) -> str:
-    return (f'🚀 <b>{html.escape(symbol or "TOKEN")}</b> {multiple:.1f}x sejak call · '
-            f'MC {market_cap(mcap_sol, sol_usd)} · {duration(minutes * 60)}')
+                   minutes: float, *, threshold: int | None = None,
+                   entry_price_sol: float | None = None,
+                   peak_price_sol: float | None = None,
+                   market_unverified: bool = False, mint: str | None = None) -> str:
+    """Human-readable follow-up. These are observed prices, never realized PnL."""
+    target = threshold or int(multiple)
+    pct = (multiple - 1) * 100
+    label = 'alert' if market_unverified else 'call'
+    lines = [
+        f'🚀 <b>SOLTER · MILESTONE {target}×</b>',
+        f'🪙 <b>${html.escape(symbol or "TOKEN")}</b>',
+        '',
+        '📈 <b>PUNCAK TERPANTAU</b>',
+        f'• Kenaikan harga: <b>{multiple:.2f}×</b> (<b>{pct:+.1f}%</b>)',
+        f'• Level terlampaui: <b>{target}×</b>',
+        f'• Waktu puncak terpantau: <b>{duration(minutes * 60)}</b> sejak {label}',
+    ]
+    if entry_price_sol and peak_price_sol and entry_price_sol > 0 and peak_price_sol > 0:
+        lines += ['', '💰 <b>HARGA REFERENSI</b>',
+                  f'• Saat {label}: <b>{unit_price(entry_price_sol, sol_usd)}</b>',
+                  f'• Puncak terpantau: <b>{unit_price(peak_price_sol, sol_usd)}</b>']
+    # Chain mode knows the token supply from an earlier verification; market
+    # snapshots do not, so never synthesize their market cap using PUMP_SUPPLY.
+    if mcap_sol is not None and not market_unverified:
+        lines.append(f'• MC puncak estimasi: {market_cap(mcap_sol, sol_usd)}')
+    if market_unverified:
+        lines += ['', '🛡️ <b>KEAMANAN: BELUM DIVERIFIKASI ON-CHAIN</b>',
+                  'Sinyal ini memakai snapshot pasar, bukan audit kontrak.']
+    else:
+        lines += ['', '🛡️ <i>Status keamanan dapat berubah setelah call awal.</i>']
+    if mint:
+        lines += ['', '📋 <b>CONTRACT ADDRESS</b>', f'<code>{html.escape(mint)}</code>']
+    lines += ['', '<i>Kenaikan harga terpantau ≠ profit terealisasi. Fee, slippage, dan '
+                 'pergerakan di antara snapshot tidak dihitung.</i>']
+    return '\n'.join(lines)
 
 
-def dev_sold_text(symbol: str) -> str:
-    return f'⚠️ Dev <b>{html.escape(symbol or "TOKEN")}</b> menjual setelah call. Hati-hati.'
+def dev_sold_text(symbol: str, mint: str | None = None) -> str:
+    lines = ['⚠️ <b>SOLTER · PERINGATAN CREATOR</b>',
+             f'🪙 <b>${html.escape(symbol or "TOKEN")}</b>', '',
+             '🔴 <b>TRANSAKSI JUAL TERDETEKSI</b>',
+             'Dev/creator terpantau menjual token setelah call awal.',
+             'Ini merupakan sinyal risiko tambahan, bukan bukti pasti rug pull.']
+    if mint:
+        lines += ['', '📋 <b>CONTRACT ADDRESS</b>', f'<code>{html.escape(mint)}</code>']
+    return '\n'.join(lines)
 
 
 class Telegram:
@@ -177,11 +216,18 @@ class Telegram:
             state, message_id = await self.send('sendMessage', {**common, 'link_preview_options': plain})
         return state, message_id
 
-    async def reply(self, text: str, message_id: int | None) -> str:
+    async def reply(self, text: str, message_id: int | None, mint: str | None = None) -> str:
         payload = {'chat_id': self.chat, 'parse_mode': 'HTML', 'text': text,
                    'link_preview_options': json.dumps({'is_disabled': True})}
+        if mint:
+            payload['reply_markup'] = links(mint)
         if message_id:
             payload['reply_parameters'] = json.dumps({'message_id': message_id,
                                                       'allow_sending_without_reply': True})
         state, _ = await self.send('sendMessage', payload)
+        if state == 'rejected' and message_id:
+            # A deleted/expired parent should not suppress a milestone; retry
+            # once without the reply reference, never after an uncertain send.
+            payload.pop('reply_parameters', None)
+            state, _ = await self.send('sendMessage', payload)
         return state

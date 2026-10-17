@@ -39,7 +39,7 @@ from .telegram import Telegram, call_text, market_alert_text, dev_sold_text, mil
 
 LOG = logging.getLogger('solter')
 TX_OPTIONS = {'encoding': 'jsonParsed', 'commitment': 'confirmed', 'maxSupportedTransactionVersion': 1}
-MILESTONES = (2, 3, 5, 10)
+MILESTONES = (2, 3, 5, 10, 20, 50, 100)
 METADATA_RETRY = 300    # a metadata fetch that failed is tried again after this
 CHECK_TTL = 45          # seconds a passing deep check is reused
 FAILED_CHECK_TTL = 120  # confirmed quality failures can be reused briefly
@@ -1097,12 +1097,15 @@ class Solter:
                 # Market-mode signals have no verified token supply; never
                 # invent a market cap by multiplying price by PUMP_SUPPLY.
                 milestone_mcap = None if o.get('grade') == 'M' else o['peak'] * PUMP_SUPPLY
-                await self.tg.reply(milestone_text(o['symbol'], multiple, milestone_mcap,
-                                                   self.sol_usd, elapsed), o['message_id'])
+                await self.tg.reply(milestone_text(
+                    o['symbol'], multiple, milestone_mcap, self.sol_usd, max(0.0, (o['peak_at'] - o['call_at']) / 60),
+                    threshold=reached, entry_price_sol=o['entry'],
+                    peak_price_sol=o['peak'], market_unverified=o.get('grade') == 'M',
+                    mint=mint), o['message_id'], mint=mint)
         if o['dev_sold'] and not o['dev_alerted']:
             updates['dev_alerted'] = 1
             if self.cfg.followups and o['message_id']:
-                await self.tg.reply(dev_sold_text(o['symbol']), o['message_id'])
+                await self.tg.reply(dev_sold_text(o['symbol'], mint), o['message_id'], mint=mint)
         if elapsed >= self.cfg.track_minutes:
             updates['done'] = 1
         if updates:

@@ -337,3 +337,21 @@ memunculkan preview besar di atas pesan; ikon dipakai jika banner tidak tersedia
 Pemuatan preview merupakan proses Telegram sendiri dan tidak selalu berhasil
 untuk semua URL gambar. Scanner tidak menunggu download banner sebelum call.
 Lihat `UPGRADE-TERMUX-2.4.1.md` untuk pemasangan.
+
+
+### Telegram follow-ups (v2.4.2)
+
+Once an alert has a tracked reference price, Solter can reply with a
+**milestone notification** when the highest **observed** price crosses 2×,
+3×, 5×, 10×, 20×, 50× or 100× from the alert reference price. The message
+includes the observed multiple, percent change, observed peak time, original
+and peak reference price, contract address, and action links. Only the highest
+new threshold is sent if one sampled price jumps across several thresholds.
+
+These are **price changes**, not realized trade returns. In `SCANNER_MODE=market`,
+tracking uses DexScreener snapshots: it may miss brief intrapoll spikes, and a
+notification can arrive later than the price movement. No wallet safety checks
+are added by the follow-up, and each message says unverified on-chain. Existing
+milestone history is preserved. Set `FOLLOWUP_ALERTS=1` (default) to enable
+follow-ups, and adjust `TRACK_MINUTES` if a different observation horizon is
+wanted; it is not a historical backfill guarantee.

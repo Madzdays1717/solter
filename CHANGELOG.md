@@ -1,3 +1,23 @@
+## v2.4.2 — professional Telegram follow-up messages (2026-10-18)
+
+- Format milestone 2×/3×/5×/10×, extended to 20×/50×/100×, with
+  prominent milestone, peak **observed** multiple, percentage change since the
+  alert (not realized profit), original reference price, observed peak price,
+  and time of observed peak relative to the alert.
+- In market mode, every milestone states **BELUM DIVERIFIKASI ON-CHAIN**;
+  never invent token supply or market cap. HTML-escape token symbols and mint.
+- Milestones and creator-sale warnings reply to their original token alert and
+  include Chart, GMGN, Pump.fun, Solscan inline URL buttons.
+- If Telegram rejects an old reply reference, send the same notification once
+  without its reply reference; an uncertain/network-timeout result is not
+  retried to avoid duplicate notifications.
+- A price jump directly across multiple thresholds sends only the **highest**
+  newly observed threshold. Existing SQLite milestones and prior alerts remain
+  intact; no database migration needed.
+- No change to market discovery or trade/risk scoring. Price tracking is still
+  snapshot-based in market mode; peaks between samples can be missed. Milestone
+  messages do not mean that someone actually bought at the alert price.
+
 ## v2.4.0 — market-only fast path, no Solana RPC by default (2026-10-18)
 
 - `SCANNER_MODE=market` becomes the default: no RPC client, sweep, holder queries,

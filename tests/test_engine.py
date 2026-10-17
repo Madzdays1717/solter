@@ -39,8 +39,8 @@ class FakeTelegram:
         self.sent.append((text, mint, image))
         return self.state, 42 if self.state == 'sent' else None
 
-    async def reply(self, text, message_id):
-        self.replies.append((text, message_id))
+    async def reply(self, text, message_id, mint=None):
+        self.replies.append((text, message_id, mint))
         return 'sent'
 
 

@@ -30,6 +30,10 @@ def dex_pair(mint=MINT, **override):
 class FakeTelegram:
     def __init__(self):
         self.sent = []
+        self.replies = []
+    async def reply(self, text, message_id, mint=None):
+        self.replies.append((text, message_id, mint))
+        return 'sent'
     async def call(self, text, mint, image):
         self.sent.append((mint, text, image))
         return 'sent', len(self.sent)
@@ -82,6 +86,25 @@ class MarketOnlyTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(self.store.token(MINT)['created_at'], time.time() - 86400)
         self.assertEqual(self.store.metrics()['market_alert_sent'], 1)
         self.assertIsNotNone(self.store.outcome(MINT))
+
+    async def test_market_milestone_is_professional_and_not_spam(self):
+        await self.batch(dex_pair())
+        before = self.store.outcome(MINT)
+        self.assertIsNotNone(before)
+        self.store.track(MINT, before['entry'] * 5.4, before['call_at'] + 10)
+        o = self.store.open_outcomes()[0]
+        await self.bot.follow(o, before['call_at'] + 25)
+        self.assertEqual(len(self.bot.tg.replies), 1)
+        message, original_id, mint = self.bot.tg.replies[0]
+        self.assertIn('MILESTONE 5×', message)
+        self.assertIn('5.40×', message)
+        self.assertIn('BELUM DIVERIFIKASI ON-CHAIN', message)
+        self.assertNotIn('MC puncak', message)
+        self.assertEqual(mint, MINT)
+        self.assertEqual(self.store.outcome(MINT)['milestone'], 5)
+        await self.bot.follow(self.store.open_outcomes()[0], before['call_at'] + 30)
+        self.assertEqual(len(self.bot.tg.replies), 1)
+        self.assertIsNone(self.bot.rpc)
 
     async def test_repeated_snapshot_does_not_send_second_alert(self):
         p = dex_pair()
