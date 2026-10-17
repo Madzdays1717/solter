@@ -24,11 +24,7 @@ def pick_pairs(payload, wanted: set[str]) -> dict[str, dict]:
     for pair in payload:
         if not isinstance(pair, dict) or pair.get('chainId') != 'solana':
             continue
-        pair = dict(pair)
-        for key in ('baseToken', 'liquidity', 'volume', 'txns', 'priceChange'):
-            if not isinstance(pair.get(key), dict):
-                pair[key] = {}
-        mint = pair['baseToken'].get('address')
+        mint = (pair.get('baseToken') or {}).get('address')
         if mint not in wanted:
             continue
         # Prefer the most liquid pool, not an arbitrary tiny duplicate pool.

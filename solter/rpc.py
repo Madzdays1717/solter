@@ -4,8 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import deque, defaultdict
-from email.utils import parsedate_to_datetime
+from collections import deque
 
 import aiohttp
 
@@ -42,7 +41,7 @@ def allowed(kind: str, used: dict, per_day: int, left: float) -> bool:
 
 
 class BoundedRPC:
-    def __init__(self, url: str, store, per_minute: int, per_day: int, session, fallback_url: str = '', *, rps: float = 5, method_rps: float = 2):
+    def __init__(self, url: str, store, per_minute: int, per_day: int, session, fallback_url: str = ''):
         self.url = url
         self.fallback_url = fallback_url
         self.store = store
@@ -52,53 +51,28 @@ class BoundedRPC:
         self.recent: deque[float] = deque()
         self.lock = asyncio.Lock()
         self.failures = 0
-        self.rps, self.method_rps = rps, method_rps
-        self.next_global = 0.0
-        self.next_method = defaultdict(float)
-        self.cooldown = 0.0
 
-    async def _take(self, kind: str, method: str = ''):
-        while True:
-            async with self.lock:
-                if not allowed(kind, self.store.budget_by_kind(), self.per_day, day_left()):
-                    raise NoBudget(f'daily RPC budget reached for {kind}')
-                now = time.monotonic()
-                while self.recent and now - self.recent[0] >= 60:
-                    self.recent.popleft()
-                due = max(self.next_global, self.next_method[method], self.cooldown)
-                if len(self.recent) >= self.per_minute:
-                    due = max(due, self.recent[0] + 60)
-                if now >= due:
-                    self.store.budget_claim(kind)
-                    self.recent.append(now)
-                    self.next_global = now + 1 / self.rps
-                    self.next_method[method] = now + 1 / self.method_rps
-                    return
-                delay = due - now
-            # Do not hold the lock while sleeping: other methods can progress.
-            await asyncio.sleep(min(delay, 1.0))
-
-    def throttle(self, value):
-        try:
-            delay = float(value)
-        except (ValueError, TypeError):
-            try:
-                delay = parsedate_to_datetime(value).timestamp() - time.time()
-            except (ValueError, TypeError, OverflowError):
-                delay = 3.0
-        self.cooldown = max(self.cooldown, time.monotonic() + max(1.0, delay))
-        self.store.metric('rpc_429')
+    async def _take(self, kind: str):
+        async with self.lock:
+            if not allowed(kind, self.store.budget_by_kind(), self.per_day, day_left()):
+                raise NoBudget(f'daily RPC budget reached for {kind}')
+            now = time.monotonic()
+            while self.recent and now - self.recent[0] >= 60:
+                self.recent.popleft()
+            if len(self.recent) >= self.per_minute:
+                await asyncio.sleep(max(.05, 60 - (now - self.recent[0])))
+            self.store.budget_claim(kind)
+            self.recent.append(time.monotonic())
 
     async def call(self, method: str, params: list, kind: str = DECISION):
         """Result of one call, or None. Every HTTP attempt costs one request of the budget."""
         for attempt in range(2):
-            await self._take(kind, method)
+            await self._take(kind)
             try:
                 async with self.session.post(self.fallback_url if attempt and self.fallback_url else self.url, json={'jsonrpc': '2.0', 'id': 1,
                                                               'method': method, 'params': params},
                                              timeout=aiohttp.ClientTimeout(total=15)) as resp:
                     if resp.status == 429:
-                        self.throttle(getattr(resp, 'headers', {}).get('Retry-After'))
                         self.failures += 1
                         if attempt == 0:
                             await asyncio.sleep(3)
@@ -108,8 +82,6 @@ class BoundedRPC:
                         self.store.metric('rpc_server_retry')
                         await asyncio.sleep(1)
                         continue
-                    if resp.status == 403:
-                        self.cooldown = max(self.cooldown, time.monotonic() + 300)
                     if resp.status >= 400:
                         LOG.warning('RPC HTTP %s on %s', resp.status, method)
                         return None

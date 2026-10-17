@@ -1,2 +1,2 @@
 """Solter: a free early-flow memecoin caller for Pump.fun tokens on Solana."""
-__version__ = '2.1.2'
+__version__ = '2.1.1'

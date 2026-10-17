@@ -1,7 +1,3 @@
-# v2.1.2
-
-Panduan terbaru: [UPGRADE-v2.1.2.md](UPGRADE-v2.1.2.md). Validasi versi ini terbatas pemeriksaan sintaks; bukan hasil backtest atau benchmark live.
-
 # Solter v2.1.1 · Radar Selektif / Anti-Spam
 
 **Perubahan utama:** radar tidak lagi mengirim notifikasi dari satu snapshot.

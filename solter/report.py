@@ -38,10 +38,6 @@ def build(store, now: float, days: int = 7) -> dict:
     reasons = sorted(((k.split(':', 1)[1], n) for k, n in metrics.items() if k.startswith('no_call:')),
                      key=lambda item: -item[1])
     return {
-        'radar_states': {r[0]: r[1] for r in store.db.execute('SELECT state,COUNT(*) FROM radar_alerts GROUP BY state')},
-        'radar_reasons': [(r[0],r[1]) for r in store.db.execute(
-            'SELECT reason,COUNT(*) FROM radar_health WHERE at>? GROUP BY reason ORDER BY COUNT(*) DESC LIMIT 10',(now-600,))],
-        'radar_average_ms': metrics.get('radar_round_ms',0)/max(1,metrics.get('radar_rounds',0)),
         'days': days,
         'calls': len(calls),
         'delivered': sum(1 for c in calls if c['state'] == 'sent'),
@@ -84,7 +80,7 @@ def render(rep: dict) -> str:
             peak = f'{row["median_peak"]:.2f}x' if row['median_peak'] else 'n/a'
             lines.append(f'  {g}: {row["calls"]} call · kena 2x {_rate(row["hit_2x"])} · median puncak {peak}')
     else:
-        lines.append('Belum ada call terverifikasi. Periksa alasan tertahan dan status RPC.')
+        lines.append('Belum ada call yang dilacak. Biarkan bot berjalan 24-72 jam.')
     lines += ['', 'Corong (sejak awal): ' + ' · '.join(f'{k}={v}' for k, v in rep['funnel'].items())]
     if rep['top_reasons']:
         lines += ['Alasan tidak call terbanyak:'] + [f'  {r}: {n}' for r, n in rep['top_reasons']]
@@ -93,10 +89,6 @@ def render(rep: dict) -> str:
         for m in rep['missed']:
             lines.append(f'  {m["symbol"] or m["mint"][:8]}: {m["peak_mcap_sol"] / m["first_mcap_sol"]:.1f}x '
                          f'· status {m["state"]} · {m["reason"] or "-"}')
-    lines += ['', 'Radar delivery: '+str(rep.get('radar_states',{})),
-              f'Rata-rata putaran radar: {rep.get("radar_average_ms",0)/1000:.2f} detik',
-              'Status kandidat 10 menit terakhir:']
-    lines += [f'  {reason}: {count}' for reason,count in rep.get('radar_reasons',[])]
     lines += ['', f'RPC hari ini: {rep["rpc_today"]}',
               'Catatan: tanpa biaya/slippage. Hasil masa lalu tidak menjamin hasil berikutnya.']
     return '\n'.join(lines)

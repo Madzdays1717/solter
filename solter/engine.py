@@ -77,13 +77,11 @@ class Solter:
         self.clock_warned = 0.0
         self.eval_jobs = {}
         self.prefetched = set()
-        self.flow_wakeup = asyncio.Event()
 
     def attach(self, session):
         self.session = session
         self.rpc = BoundedRPC(self.cfg.rpc_http, self.db, self.cfg.rpc_per_minute,
-                              self.cfg.rpc_per_day, session, self.cfg.rpc_fallback,
-                              rps=self.cfg.rpc_rps, method_rps=self.cfg.rpc_method_rps)
+                              self.cfg.rpc_per_day, session, self.cfg.rpc_fallback)
         self.tg = Telegram(self.cfg.tg_token, self.cfg.tg_chat, session)
 
     # discovery -----------------------------------------------------------
@@ -341,7 +339,6 @@ class Solter:
 
     def ingest(self, mint: str, signature: str, trades: list[Trade]):
         now = time.time()
-        self.flow_wakeup.set()
         self.db.mark(mint, signature, now)
         token = self.db.token(mint)
         if not token:
@@ -494,8 +491,60 @@ class Solter:
         return facts
 
     async def radar_once(self, now: float) -> int:
-        from .radar import run_once
-        return await run_once(self)
+        """Quality-first batch screen; retain existing watch/sweep independently.
+
+        Dex data are 5m rolling aggregates, NOT unique-buyers or on-chain proof.
+        Do not notify from one static snapshot. Confirm spaced positive changes,
+        then rank all candidates and allow at most one alert this pass.
+        """
+        tokens = self.db.radar_batch(now, self.cfg.radar_batch, self.cfg.radar_minutes)
+        candidates = []
+        for offset in range(0, len(tokens), 30):
+            chunk = tokens[offset:offset + 30]
+            wanted = {t['mint'] for t in chunk}
+            payload = await self.dex('/tokens/v1/solana/' + ','.join(t['mint'] for t in chunk))
+            if not isinstance(payload, list):
+                self.db.metric('radar_http_unavailable')
+                for t in chunk:
+                    self.db.radar_mark(t['mint'], now, None, None)
+                continue
+            pairs = pick_pairs(payload, wanted)
+            for token in chunk:
+                mint = token['mint']
+                pair = pairs.get(mint)
+                # Locally-known repeat launchers are higher-risk. Not a complete
+                # creator history and never evidence that unknown means safe.
+                if token.get('creator') and self.db.launches(token['creator']) > self.cfg.max_creator_launches > 0:
+                    self.db.metric('radar_known_serial_creator')
+                    self.db.radar_sample(mint, now, None, self.cfg.radar_confirm_seconds)
+                    self.db.radar_mark(mint, now, None, None)
+                    continue
+                mc = (number(pair.get('marketCap')) or number(pair.get('fdv'))) if pair else None
+                volume = number((pair.get('volume') or {}).get('m5')) if pair else None
+                previous_mc = ({'market_cap_usd': token['radar_mc_usd']}
+                               if token['radar_mc_usd'] else None)
+                reading = (selective_signal(pair, previous_mc, self.cfg) if pair else None)
+                previous_sample = self.db.radar_sample(
+                    mint, now, reading, self.cfg.radar_confirm_seconds)
+                self.db.radar_mark(mint, now, mc, volume)
+                if not pair:
+                    self.db.metric('radar_pair_not_listed')
+                if reading and previous_sample:
+                    confirmed = confirm_progress(
+                        reading, previous_sample,
+                        min_mc_rise=self.cfg.radar_min_confirm_mc_rise_pct,
+                        min_extra_buys=self.cfg.radar_min_extra_buys,
+                        min_extra_volume=self.cfg.radar_min_extra_volume_usd)
+                    if confirmed:
+                        mc_rise, new_buys = confirmed
+                        candidates.append((rank(reading, mc_rise, new_buys), token,
+                                           reading, mc_rise, new_buys))
+        # Do not reward the first low-quality hit merely because it sorts first.
+        candidates.sort(key=lambda x: x[0], reverse=True)
+        for _, token, reading, mc_rise, new_buys in candidates:
+            if await self.send_radar(token, reading, now, mc_rise, new_buys):
+                return 1
+        return 0
 
     async def send_radar(self, token, reading, now: float, mc_rise: float = 0,
                          new_buys: int = 0) -> bool:
@@ -503,8 +552,6 @@ class Solter:
         mint = token['mint']
         hour_limit = min(self.cfg.radar_max_alerts_per_hour,
                          self.cfg.radar_quality_max_alerts_per_hour)
-        if self.db.has_call(mint):
-            return False
         if not self.db.radar_claim(mint, now, hour_limit, reading.market_cap_usd,
                                    reading.volume_5m_usd, self.cfg.radar_alert_gap_seconds):
             return False
@@ -516,12 +563,12 @@ class Solter:
                f'💰 {mc_label} <b>${reading.market_cap_usd:,.0f}</b> '
                f'· naik {mc_rise:+.1f}% antar sampel\n'
                f'📊 Volume 5m <b>${reading.volume_5m_usd:,.0f}</b> '
-               f'· perubahan hitungan buy-5m +{new_buys}\n'
+               f'· tambahan buy-tercatat +{new_buys}\n'
                f'🟢 Buy/Sell 5m <b>{reading.buys_5m}/{reading.sells_5m}</b> '
                f'· Likuiditas ${reading.liquidity_usd:,.0f} '
                f'· harga 5m {reading.change_5m_pct:+.1f}%\n'
                f'<code>{html.escape(mint)}</code>\n\n'
-               '<i>Tersaring dari sampel pool yang sama dan diperiksa ulang sebelum kirim; bukan audit holder atau jaminan naik. '
+               '<i>Tersaring dari dua pembacaan, bukan audit holder atau jaminan naik. '
                'Jumlah transaksi beli tidak sama dengan pembeli unik. '
                'Verifikasi risiko mint, wallet, dan dev sebelum entry.</i>')
         state, _ = await self.tg.call(msg, mint, None)
@@ -573,7 +620,6 @@ class Solter:
         last = {}
         try:
             while self.running:
-                self.flow_wakeup.clear()
                 for mint, job in list(self.eval_jobs.items()):
                     if job.done():
                         job.result()
@@ -590,11 +636,7 @@ class Solter:
                         continue
                     last[mint] = time.monotonic()
                     self.eval_jobs[mint] = asyncio.create_task(self.evaluate_one(token))
-                try:
-                    await asyncio.wait_for(self.flow_wakeup.wait(), timeout=.5)
-                except asyncio.TimeoutError:
-                    pass
-                await asyncio.sleep(.05)
+                await asyncio.sleep(.5)
         finally:
             for job in self.eval_jobs.values():
                 job.cancel()

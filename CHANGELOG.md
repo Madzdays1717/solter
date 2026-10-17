@@ -1,7 +1,3 @@
-# v2.1.2
-
-Kontinuitas pool/basis valuasi, batas usia sampel, konfirmasi harga/likuiditas, recheck sebelum kirim, shortlist diagnostik, batch paralel terbatas, pacing RPC, dan 50 slot. Lihat UPGRADE-v2.1.2.md.
-
 # v2.1.1 — radar selektif / anti spam
 
 - Menghapus alert satu-snapshot; dua pembacaan berkualitas dengan MC naik, buy dan volume baru bertambah wajib.

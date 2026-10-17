@@ -30,7 +30,7 @@ class Config:
     alive_min_sol: float = 0.5
     promote_min_rate: float = 0.5
     promote_min_sol: float = 1.0
-    max_watch: int = 50
+    max_watch: int = 16
     eval_concurrency: int = 3
     quiet_seconds: int = 60
     rpc_fallback: str = ''
@@ -62,12 +62,6 @@ class Config:
     # Calls and follow-up
     # Independent free DexScreener momentum radar; no wallet calls per candidate.
     radar_enabled: bool = True
-    radar_concurrency: int = 2
-    radar_max_sample_age: int = 45
-    radar_min_price_rise: float = 1.0
-    radar_max_liquidity_drop: float = 10.0
-    rpc_rps: float = 5.0
-    rpc_method_rps: float = 2.0
     radar_interval: float = 4.0
     radar_batch: int = 120
     radar_minutes: int = 30
@@ -159,12 +153,6 @@ class Config:
 
 # field -> (environment variable, minimum, maximum); booleans ignore the bounds.
 ENV = {
-    'radar_concurrency': ('RADAR_CONCURRENCY', 1, 4),
-    'radar_max_sample_age': ('RADAR_MAX_SAMPLE_AGE_SECONDS', 15, 120),
-    'radar_min_price_rise': ('RADAR_CONFIRM_PRICE_RISE_PCT', 0, 20),
-    'radar_max_liquidity_drop': ('RADAR_MAX_LIQUIDITY_DROP_PCT', 0, 50),
-    'rpc_rps': ('RPC_REQUESTS_PER_SECOND', .1, 10),
-    'rpc_method_rps': ('RPC_METHOD_REQUESTS_PER_SECOND', .1, 4),
     'radar_enabled': ('RADAR_ENABLED', 0, 1),
     'radar_interval': ('RADAR_INTERVAL_SECONDS', 3, 60),
     'radar_batch': ('RADAR_BATCH_TOKENS', 30, 300),
@@ -196,7 +184,7 @@ ENV = {
     'alive_min_sol': ('ALIVE_MIN_SOL', 0, 50),
     'promote_min_rate': ('PROMOTE_MIN_SOL_PER_MIN', 0, 50),
     'promote_min_sol': ('PROMOTE_MIN_SOL', 0, 100),
-    'max_watch': ('MAX_ACTIVE_TOKENS', 1, 50),
+    'max_watch': ('MAX_ACTIVE_TOKENS', 1, 30),
     'watch_seconds': ('WATCH_SECONDS', 60, 1800),
     'backfill_tx': ('BACKFILL_TX', 0, 30),
     'min_buys': ('MIN_BUYS', 1, 200),
