@@ -1,3 +1,25 @@
+## v2.5.0 — Full-free discovery/market architecture redesign (2026-10-18)
+
+- New SQLite-backed `MarketInventory` + independent `MarketRuntime` replace
+  the market-mode 90-token fast scan and 120-token discovery truncation.
+  Hot and cold inventory receive reserved capacity and survive restarts.
+- Provider errors receive bounded retries; migrations absent from DEX index
+  are retried without blocking other candidates. Hot scans target the configured
+  `MARKET_FAST_SECONDS` but are constrained by provider cache/rate limits.
+- Add public DexScreener SOL-quoted pool coverage for recognized Raydium,
+  Meteora and Orca venues, in addition to canonical PumpSwap. Unsupported
+  quote/pools are excluded and reasons are recorded. Still NOT on-chain verified.
+- Replace market-mode maximum MC hard rejection with higher-bar breakout tier:
+  minimum volume/liquidity scaled to MC, buy pressure, overextension controls.
+  Chain-mode limits remain unchanged.
+- Persist discovery and polling diagnostics and first observed DEX MC; new
+  CLI command `python bot.py trace --mint <CA>` and queue summary in `stats`.
+- Keep old calls, outcomes, SQLite schema migration, visual Telegram alerts,
+  privacy-safe configuration and optional legacy chain mode.
+- Offline regression tests for >120 candidates, fair hot/cold scanning, retry,
+  persistence, no-RPC delivery, and $2.24M MC breakout. No measured live latency,
+  false-positive rate, or 2x recall available yet.
+
 ## v2.4.2 — professional Telegram follow-up messages (2026-10-18)
 
 - Format milestone 2×/3×/5×/10×, extended to 20×/50×/100×, with

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Solter command line: run | doctor | stats | test | report | probe."""
+"""Solter command line: run | doctor | stats | test | report | probe | trace."""
 from __future__ import annotations
 
 import argparse
@@ -15,7 +15,8 @@ from solter.storage import Store
 
 def main():
     parser = argparse.ArgumentParser(description=f'Solter v{__version__}: free early memecoin caller')
-    parser.add_argument('command', choices=('run', 'doctor', 'stats', 'test', 'report', 'probe'))
+    parser.add_argument('command', choices=('run', 'doctor', 'stats', 'test', 'report', 'probe', 'trace'))
+    parser.add_argument('--mint', help='trace: contract address token Solana')
     parser.add_argument('--days', type=int, default=7, help='report: days to include')
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -31,6 +32,23 @@ def main():
         elif args.command == 'report':
             from solter.report import build, render
             print(render(build(store, time.time(), max(1, args.days))))
+        elif args.command == 'trace':
+            from solter.chain import valid_address
+            from solter.market_inventory import MarketInventory
+            if not valid_address(args.mint):
+                parser.error('trace requires --mint <valid Solana address>')
+            inventory = MarketInventory(store)
+            token = store.token(args.mint)
+            call = store.call(args.mint)
+            row = inventory.trace(args.mint)
+            # One specific CA, no secrets, no raw wallet or RPC query strings.
+            print(json.dumps({'mint': args.mint, 'discovery': row,
+                'token': {k: token.get(k) for k in (
+                    'stage','state','reason','migrated_at','market_at','market_mcap_usd',
+                    'market_buys','market_sells','market_volume_usd',
+                    'market_liquidity_usd','market_change_pct')} if token else None,
+                'call': {k: call.get(k) for k in ('at','state','score','grade')}
+                    if call else None}, indent=2, default=str))
         elif args.command == 'probe':
             from solter.engine import probe
             print(json.dumps(asyncio.run(probe(cfg, store)), indent=2, default=str))

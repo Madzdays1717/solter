@@ -28,6 +28,38 @@ def gecko_mints(payload: object) -> list[str]:
     return found
 
 
+
+# Supported liquid SOL-quoted market venues. Market alerts remain explicitly
+# UNVERIFIED: this allowlist is not contract/pool verification.
+MARKET_DEXES = {'pumpswap', 'pumpamm', 'raydium', 'raydiumclmm',
+                'meteora', 'meteoradlmm', 'orca'}
+
+
+def market_pairs(pairs: object, allowed: set[str]) -> dict[str, dict]:
+    """Best supported SOL-quoted pool per mint; never accept arbitrary pair data."""
+    from .chain import WSOL
+    best: dict[str, dict] = {}
+    for p in pairs if isinstance(pairs, list) else []:
+        if not isinstance(p, dict) or p.get('chainId') != 'solana':
+            continue
+        mint = (p.get('baseToken') or {}).get('address')
+        dex = str(p.get('dexId') or '').lower().replace('-', '').replace('_','')
+        if mint not in allowed or dex not in MARKET_DEXES:
+            continue
+        if (p.get('quoteToken') or {}).get('address') != WSOL:
+            continue
+        if not valid_address(p.get('pairAddress')):
+            continue
+        if dex in ('pumpswap', 'pumpamm'):
+            from .chain import migration_pool
+            if migration_pool(mint) != p['pairAddress']:
+                continue
+        prev = best.get(mint)
+        if prev is None or (_number((p.get('liquidity') or {}).get('usd')) or 0) > (
+                _number((prev.get('liquidity') or {}).get('usd')) or 0):
+            best[mint] = p
+    return best
+
 def by_mint(pairs: object, allowed: set[str]) -> dict[str, dict]:
     result: dict[str, dict] = {}
     for item in pairs if isinstance(pairs, list) else []:
@@ -67,6 +99,7 @@ def market_snapshot(pair: dict, now: float) -> dict | None:
                 market_volume_usd=volume, market_liquidity_usd=liquidity,
                 market_change_pct=change5, market_mcap_usd=_number(pair.get('marketCap')),
                 pair_created_at=created,
+                market_dex=str(pair.get('dexId') or '')[:32],
                 symbol=str((pair.get('baseToken') or {}).get('symbol') or '')[:32],
                 name=str((pair.get('baseToken') or {}).get('name') or '')[:80])
 

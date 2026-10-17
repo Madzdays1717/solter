@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS tokens (
   reason TEXT NOT NULL DEFAULT '',
   market_at REAL, market_buys INTEGER, market_sells INTEGER,
   market_volume_usd REAL, market_liquidity_usd REAL, market_change_pct REAL,
-  market_mcap_usd REAL, pair_created_at REAL);
+  market_mcap_usd REAL, pair_created_at REAL, market_dex TEXT);
 CREATE INDEX IF NOT EXISTS tokens_state ON tokens(state, created_at);
 CREATE INDEX IF NOT EXISTS tokens_creator ON tokens(creator);
 CREATE INDEX IF NOT EXISTS tokens_sweep ON tokens(state, stage, checks, created_at);
@@ -78,7 +78,8 @@ class Store:
         for name, typ in (('market_at', 'REAL'), ('market_buys', 'INTEGER'),
                           ('market_sells', 'INTEGER'), ('market_volume_usd', 'REAL'),
                           ('market_liquidity_usd', 'REAL'), ('market_change_pct', 'REAL'),
-                          ('market_mcap_usd', 'REAL'), ('pair_created_at', 'REAL')):
+                          ('market_mcap_usd', 'REAL'), ('pair_created_at', 'REAL'),
+                          ('market_dex', 'TEXT')):
             if name not in installed:
                 self.db.execute(f'ALTER TABLE tokens ADD COLUMN {name} {typ}')
         self.db.commit()
@@ -427,10 +428,23 @@ class Store:
         self.db.commit()
 
     def stats(self) -> dict:
+        has_market_queue = bool(self.db.execute("SELECT 1 FROM sqlite_master "
+                    "WHERE type='table' AND name='market_queue'").fetchone())
+        queue = {}
+        if has_market_queue:
+            now = time.time()
+            total, due, high, waiting = self.db.execute('''SELECT COUNT(*),
+                SUM(CASE WHEN due_at<=? THEN 1 ELSE 0 END),
+                SUM(CASE WHEN priority>=2 THEN 1 ELSE 0 END),
+                SUM(CASE WHEN first_market_at IS NULL THEN 1 ELSE 0 END)
+                FROM market_queue WHERE mint NOT IN (SELECT mint FROM calls)''',
+                (now,)).fetchone()
+            queue = {'candidates': total, 'due': due or 0,
+                     'hot': high or 0, 'never_indexed': waiting or 0}
         return {'tokens': {r[0]: r[1] for r in self.db.execute(
                     'SELECT state, COUNT(*) FROM tokens GROUP BY state')},
                 'calls': {r[0]: r[1] for r in self.db.execute(
                     'SELECT state, COUNT(*) FROM calls GROUP BY state')},
-                'metrics': self.metrics(),
+                'market_queue': queue, 'metrics': self.metrics(),
                 'rpc_today': self.budget_used(),
                 'rpc_today_by_kind': self.budget_by_kind()}

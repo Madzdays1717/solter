@@ -160,10 +160,12 @@ class MarketOnlyTests(unittest.IsolatedAsyncioTestCase):
     async def test_migration_is_retried_without_rpc_when_dex_is_late(self):
         now = time.time()
         self.bot.on_migration(MINT, now)
-        self.assertIn(MINT, self.bot.market_urgent)
+        self.assertEqual(self.bot.market_inventory.trace(MINT)['source'], 'pumpportal_migration')
         self.assertTrue(self.bot.market_fast_wakeup.is_set())
+        self.assertIn(MINT, self.bot.market_inventory.due(now, 30))
+        self.bot.market_inventory.result(MINT, now, indexed=False)
+        self.assertLessEqual(self.bot.market_inventory.trace(MINT)['due_at'], now + 21)
         self.assertIn(MINT, self.store.hot_market_candidates(now + 60))
-        self.assertNotIn(MINT, self.store.hot_market_candidates(now + 181))
 
     async def test_market_snapshot_stale_and_missing_values(self):
         info = self.store.token(MINT)

@@ -1,3 +1,63 @@
+# Solter v2.5.0 — Full-Free Market Scanner
+
+**Mode default: `SCANNER_MODE=market`.** Tidak membutuhkan akun PumpDev, RPC
+Solana, private key, pembayaran API, atau eksekusi jual-beli. Ini adalah
+**alert momentum belum diverifikasi on-chain**, bukan rekomendasi atau jaminan
+profit. API gratis tidak bisa menjamin semua lonjakan tercatat real-time.
+
+## Apa yang benar-benar dirombak
+
+- **Mesin penjadwalan pasar baru** di `solter/market_runtime.py` dan
+  `solter/market_inventory.py`. Satu inventaris SQLite mencatat semua kandidat
+  sumber gratis tanpa memotong daftar di 90/120 token. Worker memilih maksimum
+  30 per batch, mencadangkan kapasitas untuk token lama, dan mengatur ulang
+  prioritas berdasarkan aktivitas. Kandidat yang belum terindeks dicoba lagi.
+- Discovery: WebSocket PumpPortal (launch dan migration), GeckoTerminal new +
+  trending pools, DexScreener profiles + boosts. Launch sebelum migrasi masuk
+  database, **tetapi belum bisa dinilai berdasarkan transaksi bonding curve**
+  tanpa feed trade/RPC. Batasan ini tidak disembunyikan.
+- Evaluasi seketika **setelah snapshot DEX diterima**, tanpa antrean pemeriksaan
+  holder/dev/RPC. Snapshot bisa di-cache oleh penyedia; polling cepat tidak
+  menjadikannya stream trade real-time.
+- **Breakout adaptif**: `MAX_MCAP_USD` dalam mode pasar adalah batas dimulainya
+  tier breakout, **bukan batas atas mutlak**. Di atas ambang itu, volume 5 menit
+  harus ≥2% MC, likuiditas ≥1% MC, minimal 24 transaksi beli serta rasio
+  beli/jual ≥1,7× (di samping syarat dasar). Token dengan MC tinggi tapi volume
+  lemah tetap ditolak. Kenaikan amat tajam memerlukan konfirmasi lebih ketat.
+- Selain PumpSwap kanonis, bisa membaca pool SOL dari Raydium, Meteora, atau
+  Orca yang diindeks DexScreener. Pool tak dikenal dan quote non-SOL belum
+  didukung. **Daftar DEX yang dikenal bukan bukti pool aman.**
+- Database lama, history call, Telegram visual + banner, milestone 2×/3×/5×
+  dan deduplikasi dipertahankan.
+
+## Perintah
+
+```sh
+python bot.py doctor
+python bot.py run
+python bot.py stats
+python bot.py trace --mint 3NxfWMHmfQg8NJFW5AG1ti2xACdczWz24e9SKyk1pump
+```
+
+`stats.market_queue` menunjukkan kandidat, yang jatuh tempo dipindai, yang
+berprioritas tinggi, dan yang belum pernah terindeks. `trace` menampilkan
+asal discovery, `first_seen` (mulai versi 2.5; data `previous_version` adalah
+waktu migrasi ke antrean baru), `first_market_at`, `first_mcap_usd`, waktu
+scan terakhir, dan alasan kegagalan terakhir. Data sebelum upgrade **tidak
+bisa direkonstruksi** jika sebelumnya tidak dicatat.
+
+Jeda `MARKET_FAST_SECONDS=15` adalah target refresh token panas *setelah
+snapshot* dan tetap dibatasi API; token lama dijadwalkan lebih jarang. Tidak
+ada jaminan setiap token terpantau tiap 15 detik. Hasil call tanpa verifikasi
+holder/dev/kontrak berpotensi scam, wash-trading, atau false positive.
+
+Lihat [UPGRADE-TERMUX.md](UPGRADE-TERMUX.md) untuk upgrade tanpa menimpa `.env`
+atau database. Tes offline: `python -m unittest discover -s tests -q`.
+
+---
+
+## Catatan teknis versi lama (arsip)
+
 # Solter v2.4.0: market-first alert Solana tanpa ketergantungan RPC
 
 ## Default baru v2.4.0: `SCANNER_MODE=market`

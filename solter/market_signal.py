@@ -32,8 +32,18 @@ def evaluate_market(data: dict, now: float, *, minimum_buys: int = 12,
     buys, sells = data['market_buys'], data['market_sells']
     volume, liquidity = data['market_volume_usd'], data['market_liquidity_usd']
     change, mcap = data['market_change_pct'], data['market_mcap_usd']
-    if mcap < min_mcap or mcap > max_mcap:
-        return MarketDecision(False, 'market mcap outside range')
+    if mcap < min_mcap:
+        return MarketDecision(False, 'market mcap below minimum')
+    # The old max_mcap was a hard ceiling. In market-only mode it now defines
+    # the *breakout tier*: bigger pools require proportionally stronger evidence.
+    # This avoids excluding strong large-cap momentum solely because discovery
+    # arrived after a price jump. These are still unverified market alerts.
+    breakout = bool(max_mcap and mcap > max_mcap)
+    if breakout:
+        minimum_liquidity = max(minimum_liquidity, mcap * .01)
+        minimum_volume = max(minimum_volume, mcap * .02)
+        minimum_buys = max(minimum_buys, 24)
+        buy_sell_ratio = max(buy_sell_ratio, 1.7)
     if liquidity < minimum_liquidity:
         return MarketDecision(False, 'market thin liquidity')
     if buys < minimum_buys or buys < buy_sell_ratio * max(1, sells):
@@ -43,9 +53,15 @@ def evaluate_market(data: dict, now: float, *, minimum_buys: int = 12,
     if change < minimum_change:
         return MarketDecision(False, 'market not rising')
     if change > maximum_change:
-        return MarketDecision(False, 'market overextended')
+        # Very large early spikes remain excluded rather than FOMO-called.
+        # An established breakout may still be included with exceptionally
+        # strong pressure, but we do not chase limitless vertical candles.
+        if not (breakout and change <= min(200, maximum_change * 2)
+                and buys >= 50 and buys >= 2 * max(1, sells)
+                and volume >= max(minimum_volume, mcap * .04)):
+            return MarketDecision(False, 'market overextended')
     # Informational momentum strength, NOT a safety/quality/confidence score.
     strength = round(min(100, 25 + min(25, buys - sells) * 1.0
                          + min(25, volume / max(liquidity, 1) * 35)
                          + min(25, change * .6)))
-    return MarketDecision(True, 'market momentum', strength)
+    return MarketDecision(True, 'market breakout' if breakout else 'market early momentum', strength)

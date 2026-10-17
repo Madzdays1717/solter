@@ -30,8 +30,10 @@ from .quality import Assessment, holder_stats, market_cap_reason, quality_reason
 from .reservoir import candidates, classify, dev_buy_pct
 from .rpc import BACKFILL, DECISION, FALLBACK, QUOTAS, SWEEP, BoundedRPC, NoBudget
 from .sources import DEX, PUMP_WS, pair_facts, parse_portal, pumpswap_pair, sol_usd_from, dex_list_mints
-from .market import GECKO, by_mint, gecko_mints, market_snapshot, market_strength, market_ready
+from .market import GECKO, by_mint, market_pairs, gecko_mints, market_snapshot, market_strength, market_ready
 from .market_signal import evaluate_market
+from .market_inventory import MarketInventory
+from .market_runtime import MarketRuntime
 from .market_media import extract_profile_media, combine_media
 from .report import pulse
 from .storage import HORIZONS, Store
@@ -78,6 +80,12 @@ class Solter:
         self.lags: deque = deque(maxlen=200)    # event timestamp minus arrival time, live trades
         self.clock_warned = 0.0
         self.market_seen: dict[str, float] = {}
+        self.market_rejected: dict[str, str] = {}
+        self.market_alert_jobs: dict[str, asyncio.Task] = {}
+        self.market_send_slots = asyncio.Semaphore(4)
+        self.market_inventory = MarketInventory(store) if isinstance(store, Store) else None
+        self.market_runtime = (MarketRuntime(self) if cfg.scanner_mode == 'market'
+                               and self.market_inventory is not None else None)
         self.market_media: dict[str, tuple[float, dict]] = {}  # cached public artwork, no fetch on call
         # Live migrations wake the free DEX snapshot refresh without any RPC work.
         self.market_urgent: set[str] = set()
@@ -151,12 +159,8 @@ class Solter:
         self.db.metric('migration_seen')
         self.scheduler_wakeup.set()
         if self.cfg.scanner_mode == 'market':
-            if len(self.market_urgent) < 300:
-                self.market_urgent.add(mint)
-                self.market_fast_wakeup.set()
-            else:
-                # Still discoverable from the persisted migration inventory.
-                self.db.metric('market_urgent_overflow')
+            self.market_inventory.add([mint], 'pumpportal_migration', now, priority=3)
+            self.market_fast_wakeup.set()
         elif was == 'watching':
             self.request_backfill(mint)
         LOG.info('MIGRATION %s (was %s)', mint[:12], was)
@@ -572,7 +576,12 @@ class Solter:
         cached = self.pairs.get(mint)
         if cached and time.time() - cached[0] < max_age:
             return cached[1]
-        facts = pair_facts(pumpswap_pair(await self.dex(f'/token-pairs/v1/solana/{mint}'), mint))
+        payload = await self.dex(f'/token-pairs/v1/solana/{mint}')
+        if self.cfg.scanner_mode == 'market':
+            chosen = market_pairs(payload, {mint}).get(mint)
+        else:
+            chosen = pumpswap_pair(payload, mint)
+        facts = pair_facts(chosen)
         self.pairs[mint] = (time.time(), facts)
         return facts
 
@@ -592,7 +601,8 @@ class Solter:
 
     # Older-pool discovery and market snapshots --------------------------
     async def market_scanner(self):
-        """Free feeds complement launch events; unavailable feeds never kill other workers."""
+        if self.market_runtime is not None:
+            return await self.market_runtime.discovery_loop()
         while self.running:
             started = time.monotonic()
             try:
@@ -638,23 +648,10 @@ class Solter:
             await self.market_batch(mints[start:start + 30])
 
     async def market_fast_scanner(self):
-        """Fresh migration requests + recent hot pools, without RPC, polling, or a watch slot."""
-        while self.running:
-            self.market_fast_wakeup.clear()
-            pending = list(self.market_urgent)[:90]
-            self.market_urgent.difference_update(pending)
-            hot = self.db.hot_market_candidates(time.time(), 60)
-            mints = list(dict.fromkeys(pending + hot))[:90]
-            for start in range(0, len(mints), 30):
-                await self.market_batch(mints[start:start + 30])
-            if self.market_urgent:
-                # Drain a burst rather than sleeping 15s between backlog chunks.
-                continue
-            try:
-                await asyncio.wait_for(self.market_fast_wakeup.wait(),
-                                       timeout=self.cfg.market_fast_seconds)
-            except asyncio.TimeoutError:
-                pass
+        if self.market_runtime is not None:
+            return await self.market_runtime.scan_loop()
+        # Old chain mode uses its own scheduler and does not run this worker.
+        return
 
     async def market_batch(self, mints: list[str]):
         """One batched public DEX request; candidates are decided as each batch arrives."""
@@ -663,16 +660,36 @@ class Solter:
         payload = await self.dex('/tokens/v1/solana/' + ','.join(mints))
         if payload is None:
             self.db.metric('market_dex_unavailable')
-            return
+            return None
         now = time.time()
-        pairs = by_mint(payload, set(mints))
+        updated: set[str] = set()
+        pairs = (market_pairs(payload, set(mints)) if self.cfg.scanner_mode == 'market'
+                 else by_mint(payload, set(mints)))
+        self.market_rejected = {}
+        if self.cfg.scanner_mode == 'market' and isinstance(payload, list):
+            for item in payload:
+                if not isinstance(item, dict):
+                    continue
+                mint = (item.get('baseToken') or {}).get('address')
+                if mint not in mints or mint in pairs:
+                    continue
+                if (item.get('quoteToken') or {}).get('address') != WSOL:
+                    self.market_rejected[mint] = 'unsupported quote (only SOL pairs)'
+                    self.db.metric('market_non_sol_quote')
+                elif str(item.get('dexId','')).lower().replace('-', '') in ('pumpswap', 'pumpamm'):
+                    self.market_rejected[mint] = 'noncanonical PumpSwap pool'
+                    self.db.metric('market_noncanonical_pool')
+                else:
+                    self.market_rejected[mint] = 'unsupported DEX/pool'
+                    self.db.metric('market_unsupported_pool')
         for mint, pair in pairs.items():
             try:
                 pool = pair['pairAddress']
                 if self.cfg.scanner_mode == 'market' and (pair.get('quoteToken') or {}).get('address') != WSOL:
                     self.db.metric('market_non_sol_quote')
                     continue
-                if migration_pool(mint) != pool:
+                if (str(pair.get('dexId', '')).lower().replace('-', '') in ('pumpswap', 'pumpamm')
+                        and migration_pool(mint) != pool):
                     self.db.metric('market_noncanonical_pool')
                     # Without RPC, owner/vault verification is impossible.
                     # Market-only alerts require the deterministic migration pool.
@@ -689,17 +706,39 @@ class Solter:
                                         self.cfg.market_min_volume_usd,
                                         self.cfg.min_liquidity_usd)
                 created = self.db.update_market(mint, pool, snapshot, now, eligible)
+                updated.add(mint)
                 self.db.metric('market_discovered' if created else 'market_updated')
                 if self.cfg.scanner_mode == 'market':
                     # Artwork/socials from data already fetched; no added network request.
                     cached = self.market_media.get(mint)
                     profile = cached[1] if cached and now - cached[0] <= 3600 else None
                     media = combine_media(pair, profile)
-                    await self.consider_market(mint, now, facts, media)
+                    # Network delivery must never stop other tokens being scanned.
+                    # One in-flight decision per mint; SQLite claim prevents
+                    # duplicate messages when another batch arrives.
+                    if mint not in self.market_alert_jobs:
+                        task = asyncio.create_task(self._market_alert_job(mint, now, facts, media))
+                        self.market_alert_jobs[mint] = task
                 elif eligible:
                     self.scheduler_wakeup.set()
             except (TypeError, ValueError, KeyError):
                 self.db.metric('market_bad_pair')
+        # Yield so local decisions begin immediately; never await Telegram
+        # latency as a batch barrier. The queue worker can scan next batch.
+        if self.cfg.scanner_mode == 'market':
+            await asyncio.sleep(0)
+        return updated
+
+    async def _market_alert_job(self, mint: str, now: float, facts: dict, media: dict):
+        try:
+            await self.consider_market(mint, now, facts, media)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOG.exception('market decision failed for %s', mint[:12])
+            self.db.metric('market_decision_error')
+        finally:
+            self.market_alert_jobs.pop(mint, None)
 
     async def consider_market(self, mint: str, now: float, facts: dict,
                               media: dict | None = None):
@@ -728,7 +767,10 @@ class Solter:
         media = media or {}
         text = market_alert_text(token, decision.strength, now, media.get('socials'))
         decision_started = time.monotonic()
-        state, msg_id = await self.tg.call(text, mint, media.get('image'))
+        # Only delivery is bounded. Scanning and local decision never wait
+        # for another token's Telegram network round-trip.
+        async with self.market_send_slots:
+            state, msg_id = await self.tg.call(text, mint, media.get('image'))
         delivery_ms = round((time.monotonic() - decision_started) * 1000)
         price = facts.get('price_sol')
         mcap = token['market_mcap_usd'] / self.sol_usd if self.sol_usd else None
@@ -741,6 +783,9 @@ class Solter:
         if state == 'sent' and isinstance(price, (int, float)) and price > 0:
             self.db.open_outcome(mint, price, now)
         self.db.metric('market_alert_sent' if state == 'sent' else f'market_alert_{state}')
+        if self.market_inventory is not None:
+            self.market_inventory.record_reason(mint,
+                'market alert sent' if state == 'sent' else 'telegram ' + state)
         LOG.info('MARKET ALERT %s strength=%d delivery=%s telegram_ms=%d (no RPC verification)',
                  mint[:12], decision.strength, state, delivery_ms)
 
@@ -861,6 +906,8 @@ class Solter:
             self.reasons[mint] = reason
             self.db.metric(f'no_call:{reason}')
             self.db.update(mint, reason=reason)
+            if self.market_runtime is not None:
+                self.market_inventory.record_reason(mint, reason)
 
     async def consider(self, token: dict, now: float):
         mint = token['mint']
@@ -1121,6 +1168,8 @@ class Solter:
             for cache, ttl in ((self.checked, 300), (self.metadata, 3600), (self.pairs, 600)):
                 for key in [k for k, v in cache.items() if now - v[0] > ttl]:
                     del cache[key]
+            if self.market_runtime is not None:
+                self.market_inventory.prune(now)
             if len(self.reasons) > 5000:
                 self.reasons.clear()
             # Long-running Termux sessions may see tens of thousands of tokens.
@@ -1191,6 +1240,11 @@ class Solter:
                 for job in jobs:
                     job.cancel()
                 await asyncio.gather(*jobs, return_exceptions=True)
+                for task in self.market_alert_jobs.values():
+                    task.cancel()
+                if self.market_alert_jobs:
+                    await asyncio.gather(*list(self.market_alert_jobs.values()),
+                                         return_exceptions=True)
 
 
 async def probe(cfg: Config, store: Store, samples: int = 5) -> dict:

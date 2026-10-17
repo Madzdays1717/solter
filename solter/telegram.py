@@ -109,7 +109,7 @@ def market_alert_text(token: dict, strength: int, now: float,
     lines = [
         '⚡ <b>SOLTER MOMENTUM ALERT</b>',
         f'<b>{name}</b>  ·  ${symbol}',
-        f'🔁 PumpSwap  •  Pool {age}', '',
+        f'🔁 {e(str(token.get("market_dex") or "PumpSwap")[:25])}  •  Pool {age}', '',
         '📈 <b>MOMENTUM 5 MENIT</b>',
         f'• Harga <b>{change:+.1f}%</b>   |   MC <b>{usd(mcap)}</b>',
         f'• Volume <b>{usd(vol)}</b>   |   Likuiditas <b>{usd(liq)}</b>',
