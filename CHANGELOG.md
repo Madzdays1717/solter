@@ -1,19 +1,19 @@
-# v2.1.1 — radar selektif / anti spam
-
-- Menghapus alert satu-snapshot; dua pembacaan berkualitas dengan MC naik, buy dan volume baru bertambah wajib.
-- Gerbang likuiditas, tekanan jual, MC, harga 5 menit untuk mengurangi koin berisiko/terlambat, bukan jaminan anti rugpull.
-- Memprioritaskan kandidat teratas; cap 4 radar/jam, cooldown global 600 detik dan dedup persisten.
-- CALL kini grade B/A saja (minimal 60/100); milestone spam off default, peringatan dev jual tetap ada.
-- Migrasi SQLite otomatis `radar_samples`; aman untuk database lama.
-- 89 unit test lokal berhasil, tanpa pengujian live pada jaringan.
-
----
-
-# v2.0.2
-
-Evaluasi paralel terbatas, cache kegagalan sementara 10 detik, prefetch kandidat aktif, pemeriksaan momentum ulang setelah RPC, retry/fallback HTTP opsional, log penolakan/durasi, default 16 slot dan quiet rotation 60 detik. Lihat UPGRADE-v2.0.2.md.
-
 # Changelog
+
+## v2.1.0 (2026-10-17): volume, market cap, dan CALL_MODE
+
+- **Volume aktif**: volume beli+jual dalam jendela 3 menit harus cukup (`MIN_VOLUME_SOL`).
+- **Anti wash trading**: porsi volume dari wallet yang beli dan jual dalam jendela yang sama dibatasi
+  (`MAX_CHURN_PCT`). Aturan "net/volume" sengaja tidak dipakai karena sama dengan `MAX_SELL_RATIO_PCT`.
+- **Rentang market cap USD** (`MIN_MCAP_USD`, `MAX_MCAP_USD`): dicek dari harga trade terakhir
+  sebelum cek mendalam (hemat RPC), lalu sekali lagi dari harga on-chain. Tidak berlaku saat harga SOL
+  belum diketahui.
+- **`CALL_MODE` = ketat / seimbang / agresif**: satu pengaturan untuk semua ambang call. Default baru
+  `seimbang` lebih longgar dari v2.0.x (`ketat` = nilai lama), karena call tidak kunjung datang dan
+  koin yang naik kencang ditolak sebagai "overextended" (+100%/3 mnt) atau "late on curve" (85%).
+- Log `STATUS` tiap 5 menit: corong, alasan penolakan terbanyak, dan peringatan `CEK:` (PumpPortal
+  diam, WebSocket tanpa trade, jatah RPC habis).
+- Pesan call menampilkan volume 3 menit.
 
 ## v2.0.1 (2026-10-17): perbaikan hasil audit "call tidak datang"
 
@@ -60,11 +60,3 @@ Evaluasi paralel terbatas, cache kegagalan sementara 10 detik, prefetch kandidat
 
 - Watcher early-flow pertama: discovery PumpPortal, `logsSubscribe` per kandidat, klasifikasi
   selisih saldo, sinyal berbasis hitungan, harga DexScreener, satu call Telegram per mint.
-
-## v2.1.0 — Radar Volume/MC Aktif
-- Radar gratis DexScreener 30 alamat per request, independen dari slot logsSubscribe dan quality-check.
-- Deteksi volume 5m, buy/sell, price momentum, kenaikan MC, fallback FDV berlabel estimasi.
-- Dedup radar dengan batas terpisah dari CALL terverifikasi, plus 429 adaptive cooldown.
-- FIFO token yang belum disapu, pemeriksaan awal dari 45s ke 10s.
-- Skema SQLite lama ditambah tiga kolom tanpa menghapus history.
-- Empat tes radar tambahan; 83 tes total lulus.

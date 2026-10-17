@@ -1,28 +1,9 @@
-# Solter v2.1.1 · Radar Selektif / Anti-Spam
-
-**Perubahan utama:** radar tidak lagi mengirim notifikasi dari satu snapshot.
-Dua sampel berkualitas harus menunjukkan MC naik, volume bertambah, dan
-transaksi beli baru bertambah dengan tekanan jual rendah, minimal 15 detik
-terpisah. Likuiditas harus diketahui dan memadai. Kandidat diurutkan berdasarkan
-momentum, hanya yang teratas diberi alert, maksimal 4/jam dengan jeda 10 menit.
-Ini mengurangi spam **tetapi dapat melewatkan pump sangat cepat**.
-
-Jalur `⚡ SOLTER CALL` kini minimal grade B (60/100), termasuk ketika `.env`
-versi lama masih mengisi `MIN_SCORE=0`. Balasan milestone dimatikan secara default,
-namun peringatan dev jual dipertahankan.
-
-**Penting:** DexScreener `txns.m5` adalah jumlah transaksi, **bukan jumlah wallet unik**.
-Volume tinggi juga dapat dimanipulasi (wash trading). Sinyal radar tetap belum
-menjamin keamanan kontrak ataupun profit. Tidak ada pengujian live Termux pada rilis ini.
-
-Panduan pemasangan: [UPGRADE-v2.1.1.md](UPGRADE-v2.1.1.md).
-
 # Solter v2: caller memecoin awal, 100% sumber gratis
 
-Solter menerima launch yang terlihat melalui stream Pump.fun, memantau volume/MC via radar, memilih aliran SOL yang aktif, membaca
+Solter memantau setiap token baru Pump.fun, memilih yang uang masuknya paling cepat, membaca
 trade-nya langsung dari log Solana, lalu mengirim **satu** call Telegram hanya jika aliran beli
 nyata (dalam SOL), distribusi holder, dev, creator, dan kontraknya lolos. Setiap call dilacak
-60 menit (hasil tetap dilacak; peringatan dev jual aktif) supaya kualitas filter bisa dibuktikan dan disetel.
+60 menit (2x/3x/5x/10x, dev jual) supaya kualitas filter bisa dibuktikan dan disetel.
 
 - **Gratis**: PumpPortal (launch & migrasi), RPC Solana publik/free tier, DexScreener, metadata IPFS.
   Tanpa langganan, tanpa API key wajib.
@@ -109,7 +90,7 @@ Nama Koin ($SYM)
 
 🧪 Bonding curve 34% · umur 6 mnt
 💰 MC $12.3K (82 SOL) · harga $0.00001234
-📈 Net inflow +6.4 SOL /3 mnt · harga +38%
+📈 Net inflow +6.4 SOL · vol 9.8 SOL /3 mnt · harga +38%
 👥 14 pembeli · 6 aktif 45 dtk · burst 5/20 dtk
 🐳 Top10 18.5% · terbesar 4.1% · dev 2.0%
 👨‍💻 Dev: launch ke-1 · beli awal 3.2% · belum terlihat jual
@@ -147,13 +128,35 @@ kuota kredit, sesuaikan `RPC_REQUESTS_PER_DAY` dengan biaya kredit per metode di
 
 ## Menyetel filter
 
-Semua ambang ada di `.env.example` dengan penjelasan. Default `CALL_MIN_QUALITY_SCORE=60`: hanya token grade B/A yang
-lolos pemeriksaan on-chain dan skor kualitas akan dikirim sebagai CALL. Grade C tidak dikirim.
-Cara yang disarankan:
+Cara termudah: satu baris `CALL_MODE` di `.env`.
 
-1. Jalankan 24-72 jam dengan default.
-2. `python bot.py report`: lihat hit rate per grade dan bagian *"Token yang naik ≥3x ... tanpa call"*.
-3. Ubah satu ambang yang paling sering membuang runner, ulangi.
+| Mode | Untuk | Contoh aturan |
+|---|---|---|
+| `ketat` | Sedikit call, filter paling keras | ≥ 8 buy, net ≥ 2 SOL, MC $8K–$40K, harga naik ≤ 100%/3 mnt |
+| `seimbang` (default) | Tengah-tengah | ≥ 6 buy, net ≥ 1,5 SOL, vol ≥ 4 SOL, MC $6K–$80K, naik ≤ 200% |
+| `agresif` | Lebih banyak call, lebih banyak juga yang gagal | ≥ 5 buy, net ≥ 1 SOL, vol ≥ 3 SOL, MC $5K–$150K, naik ≤ 400% |
+
+Setiap mode juga memakai aturan volume dan market cap:
+- **Volume aktif** dalam 3 menit harus cukup.
+- **Volume palsu** ditolak: kalau sebagian besar volume berasal dari wallet yang beli lalu jual lagi
+  dalam 3 menit yang sama, itu bot (wash trading), bukan permintaan nyata.
+- **Market cap** harus di dalam rentang mode itu, dicek dari harga on-chain sebelum RPC dipakai.
+
+Angka satu per satu tetap bisa ditimpa: hapus tanda `#` di bagian bawah `.env.example`. Angka yang
+ditulis di `.env` selalu mengalahkan mode, jadi `.env` lama yang berisi semua angka akan mengabaikan
+`CALL_MODE`. Buat `.env` baru dari `.env.example`.
+
+**Membaca log.** Tiap 5 menit bot menulis satu baris `STATUS` berisi corong (launch → hidup →
+dipantau → trade terbaca → call) dan tiga alasan penolakan terbanyak, misalnya
+`ditolak: few buyers 12, mcap too high 4`. Kalau ada yang rusak (PumpPortal diam, WebSocket tidak
+memberi trade, jatah RPC habis), muncul baris `CEK:` dengan sarannya.
+
+Cara menyetel:
+
+1. Jalankan 24-72 jam.
+2. `python bot.py report`: lihat hit rate per grade dan bagian *"Token yang naik ≥3x ... tanpa call"*
+   beserta alasannya.
+3. Kalau alasan terbanyak selalu sama, longgarkan aturan itu saja, atau pindah mode.
 
 ## Batasan
 

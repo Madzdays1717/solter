@@ -68,7 +68,8 @@ def call_text(token: dict, flow: Flow, a: Assessment, sol_usd: float | None, now
         lines.append(f'🧪 Bonding curve {a.progress or 0:.0f}% · umur {age}')
     lines.append(f'💰 MC {market_cap(a.mcap_sol, sol_usd)} · harga {unit_price(a.price_sol, sol_usd)}')
     run = f' · harga {flow.run * 100:+.0f}%' if flow.run is not None else ''
-    lines.append(f'📈 Net inflow <b>{flow.net_sol:+.1f} SOL</b> /{duration(window)}{run}')
+    lines.append(f'📈 Net inflow <b>{flow.net_sol:+.1f} SOL</b> · vol {flow.volume_sol:.1f} SOL '
+                 f'/{duration(window)}{run}')
     lines.append(f'👥 {flow.buyers} pembeli · {flow.recent_buyers} aktif 45 dtk · '
                  f'burst {flow.burst}/20 dtk')
     if a.holders:

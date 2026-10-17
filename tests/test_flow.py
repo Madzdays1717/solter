@@ -69,6 +69,19 @@ class FlowTests(unittest.TestCase):
         rows = [buy(i, price=1e-8 * (1 + i * .05)) for i in range(10)]
         self.assertTrue(evaluate(rows, NOW).ok)
 
+    def test_volume_and_wash_trading(self):
+        rows = [buy(i, sol=.3) for i in range(10)]
+        self.assertEqual(evaluate(rows, NOW, Rules(min_net_sol=1, min_volume_sol=4)).reason, 'low volume')
+        self.assertTrue(evaluate(rows, NOW, Rules(min_net_sol=1, min_volume_sol=3)).ok)
+        # Real buyers plus a bot that buys and sells big amounts in the same window.
+        bot = addr('bot')
+        churn = self.healthy() + [buy(30, sol=4, ago=50, wallet=bot), sell(bot, 3.9, ago=40),
+                                  buy(31, sol=4, ago=30, wallet=bot), sell(bot, 3.9, ago=20)]
+        flow = evaluate(churn, NOW, Rules(max_wallet_share=1, max_sell_ratio=1, max_churn=.6))
+        self.assertEqual(flow.reason, 'wash trading')
+        self.assertGreater(flow.churn, .6)
+        self.assertAlmostEqual(flow.volume_sol, 5 + 15.8)
+
     def test_unknown_sizes_fail_closed(self):
         rows = [Trade(addr(i), 'buy', 1, None, NOW - 100 + i * 9) for i in range(10)]
         self.assertEqual(evaluate(rows, NOW).reason, 'trade sizes unknown')

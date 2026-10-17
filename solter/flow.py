@@ -24,6 +24,8 @@ class Rules:
     max_wallet_share: float = .30  # largest buyer's share of buy SOL
     max_bundle_share: float = .50  # buy SOL in slots where 3+ wallets bought together
     max_sell_ratio: float = .60   # sell SOL / buy SOL
+    min_volume_sol: float = 0.0   # all SOL traded in the window (buys of any size and sells)
+    max_churn: float = 1.0        # share of that volume from wallets that both bought and sold
     max_lag: float = 30           # newest buy must be this fresh (seconds)
     max_run: float = 1.0          # price rise across the window (1.0 = +100%)
     min_span: float = 20          # seconds between first and last buy
@@ -45,6 +47,8 @@ class Flow:
     bundle_share: float = 0.0
     run: float | None = None
     creator_sold: bool = False
+    volume_sol: float = 0.0
+    churn: float = 0.0
 
     @property
     def net_sol(self) -> float:
@@ -81,12 +85,23 @@ def evaluate(trades: list[Trade], now: float, rules: Rules = Rules(),
     bundled = sum(sum(t.sol for t in group) for group in by_slot.values()
                   if len({t.wallet for t in group}) >= 3)
     bundle_share = bundled / buy_sol if buy_sol else 0.0
+    # Volume counts every trade; churn is the part of it from wallets that bought and also
+    # sold inside the window (volume bots and flippers), which inflates volume without demand.
+    volume = sum(t.sol or 0 for t in window)
+    by_wallet: dict = defaultdict(lambda: [0.0, False, False])
+    for t in window:
+        entry = by_wallet[t.wallet]
+        entry[0] += t.sol or 0
+        entry[1 if t.side == 'buy' else 2] = True
+    churned = sum(v for v, bought, sold in by_wallet.values() if bought and sold)
+    churn = churned / volume if volume else 0.0
     prices = [t.price for t in window if t.price]
     run = prices[-1] / prices[0] - 1 if len(prices) >= 2 else None
 
     flow = dict(buys=len(buys), sells=len(sells), buyers=len(buyers), recent_buyers=len(recent),
                 burst=burst, buy_sol=buy_sol, sell_sol=sell_sol, top_share=top_share,
-                bundle_share=bundle_share, run=run, creator_sold=creator_sold)
+                bundle_share=bundle_share, run=run, creator_sold=creator_sold,
+                volume_sol=volume, churn=churn)
 
     def verdict(reason: str, ok: bool = False) -> Flow:
         return Flow(ok, reason, **flow)
@@ -101,12 +116,16 @@ def evaluate(trades: list[Trade], now: float, rules: Rules = Rules(),
         return verdict('few buyers')
     if buy_sol - sell_sol < rules.min_net_sol:
         return verdict('weak net inflow')
+    if volume < rules.min_volume_sol:
+        return verdict('low volume')
     if len(recent) < 3 or burst < 3:
         return verdict('momentum faded')
     if now - buys[-1].at > rules.max_lag:
         return verdict('stale flow')
     if sell_sol > buy_sol * rules.max_sell_ratio:
         return verdict('sell pressure')
+    if churn > rules.max_churn:
+        return verdict('wash trading')
     if top_share > rules.max_wallet_share:
         return verdict('one wallet dominates')
     if bundle_share > rules.max_bundle_share:

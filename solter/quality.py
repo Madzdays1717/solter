@@ -24,6 +24,8 @@ class QualityRules:
     max_progress: float = 85.0       # bonding curve progress, percent
     require_socials: bool = False
     min_score: int = 0
+    min_mcap_usd: float = 0.0        # market cap window in USD (0 = no limit)
+    max_mcap_usd: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -130,6 +132,18 @@ def score(flow: Flow, holders: Holders, socials: Socials, launches: int) -> int:
 
 def grade(points: int) -> str:
     return 'A' if points >= 75 else 'B' if points >= 60 else 'C'
+
+
+def market_cap_reason(rules: QualityRules, mcap_sol: float | None, sol_usd: float | None) -> str | None:
+    """Outside the USD market-cap window? Unknown SOL price or market cap: the window is not applied."""
+    if not mcap_sol or not sol_usd:
+        return None
+    usd = mcap_sol * sol_usd
+    if rules.min_mcap_usd and usd < rules.min_mcap_usd:
+        return 'mcap too low'
+    if rules.max_mcap_usd and usd > rules.max_mcap_usd:
+        return 'mcap too high'
+    return None
 
 
 def quality_reason(rules: QualityRules, holders: Holders | None, socials: Socials,

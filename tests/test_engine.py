@@ -4,8 +4,6 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from dataclasses import replace
-from unittest.mock import patch
 from types import SimpleNamespace
 
 import aiohttp
@@ -109,11 +107,6 @@ class EngineTests(unittest.TestCase):
                                  vsol=(38 + i) * 10**9, vtok=int(850e12 - i * 1e12))
             self.bot.on_logs(MINT, CURVE, 'new', f'sig{i}', logs([payload]), 1000 + i)
 
-    def test_noise_controls_defaults(self):
-        self.assertEqual(self.cfg.call_quality_score_floor, 60)
-        self.assertFalse(self.cfg.followup_milestones)
-        self.assertEqual(self.cfg.radar_quality_max_alerts_per_hour, 4)
-
     def test_launch_to_watch(self):
         token = self.watched()
         self.assertEqual((token['state'], token['account']), ('watching', CURVE))
@@ -153,14 +146,18 @@ class EngineTests(unittest.TestCase):
         asyncio.run(self.bot.consider(self.db.token(MINT), time.time()))
         self.assertEqual(len(self.bot.tg.sent), 1)
 
-    def test_grade_c_cannot_call_even_with_legacy_min_score_zero(self):
-        self.assertEqual(self.cfg.min_score, 0)
+    def test_market_cap_window_is_checked_before_any_rpc(self):
         self.watched()
         self.buys()
-        with patch('solter.engine.score', return_value=59):
-            asyncio.run(self.bot.consider(self.db.token(MINT), time.time()))
+        self.bot.sol_usd = 10_000.0          # makes the ~56 SOL market cap look like $560K
+        before = len(self.bot.rpc.calls)
+        asyncio.run(self.bot.consider(self.db.token(MINT), time.time()))
         self.assertEqual(self.bot.tg.sent, [])
-        self.assertEqual(self.db.token(MINT)['reason'], 'low score')
+        self.assertEqual(self.db.token(MINT)['reason'], 'mcap too high')
+        self.assertEqual(len(self.bot.rpc.calls), before)      # no deep check was paid for
+        self.bot.sol_usd = 50.0              # ~$2.8K: too early
+        asyncio.run(self.bot.consider(self.db.token(MINT), time.time()))
+        self.assertEqual(self.db.token(MINT)['reason'], 'mcap too low')
 
     def test_concentrated_holders_block_the_call(self):
         self.bot.rpc = rpc_for(largest=holders(top=6.0))
@@ -182,8 +179,6 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.db.token(MINT)['creator'], addr('real-dev'))
 
     def test_follow_ups_after_the_call(self):
-        # Milestone replies require deliberate opt-in (default is quiet).
-        self.bot.cfg = replace(self.bot.cfg, followup_milestones=True)
         self.watched()
         self.buys()
         asyncio.run(self.bot.consider(self.db.token(MINT), time.time()))

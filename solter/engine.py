@@ -25,11 +25,11 @@ from .config import Config
 from .events import (Trade, cpi_payloads, decode_amm_trade, decode_pump_trade, log_payloads,
                      trades_from_logs, trades_from_tx)
 from .flow import Flow, evaluate
-from .momentum import (number, pick_pairs, selective_signal, confirm_progress, rank)
-from .quality import Assessment, holder_stats, quality_reason, score, socials_from
+from .quality import Assessment, holder_stats, market_cap_reason, quality_reason, score, socials_from
 from .reservoir import candidates, classify, dev_buy_pct
 from .rpc import BACKFILL, DECISION, FALLBACK, QUOTAS, SWEEP, BoundedRPC, NoBudget
 from .sources import DEX, PUMP_WS, pair_facts, parse_portal, pumpswap_pair, sol_usd_from
+from .report import pulse
 from .storage import HORIZONS, Store
 from .telegram import Telegram, call_text, dev_sold_text, milestone_text
 
@@ -39,9 +39,6 @@ MILESTONES = (2, 3, 5, 10)
 METADATA_RETRY = 300    # a metadata fetch that failed is tried again after this
 CHECK_TTL = 45          # seconds a passing deep check is reused
 FAILED_CHECK_TTL = 120  # a failing one changes slowly (holders, dev): look again less often
-TRANSIENT_CHECKS = {'holders unavailable', 'curve unreadable', 'pool unverified',
-                    'price unknown', 'mint unavailable', 'thin liquidity'}
-TRANSIENT_CHECK_TTL = 10
 COOLDOWN = 300          # seconds before a demoted token may be watched again
 
 
@@ -71,17 +68,13 @@ class Solter:
         self.reasons: dict = {}
         self.dex_lock = asyncio.Lock()
         self.last_dex = 0.0
-        self.dex_throttled_until = 0.0
-        self.dex_rate_limited_streak = 0
         self.lags: deque = deque(maxlen=200)    # event timestamp minus arrival time, live trades
         self.clock_warned = 0.0
-        self.eval_jobs = {}
-        self.prefetched = set()
 
     def attach(self, session):
         self.session = session
         self.rpc = BoundedRPC(self.cfg.rpc_http, self.db, self.cfg.rpc_per_minute,
-                              self.cfg.rpc_per_day, session, self.cfg.rpc_fallback)
+                              self.cfg.rpc_per_day, session)
         self.tg = Telegram(self.cfg.tg_token, self.cfg.tg_chat, session)
 
     # discovery -----------------------------------------------------------
@@ -143,6 +136,7 @@ class Solter:
             try:
                 requests = await self.sweep_once(time.time())
             except NoBudget:
+                self.db.metric('sweep_paused')
                 LOG.warning('Sweep paused: its share of today\'s RPC budget is used')
             await asyncio.sleep(self.sweep_interval(requests))
 
@@ -185,7 +179,7 @@ class Solter:
             if now >= (t['watch_until'] or 0):
                 self.db.demote(t['mint'], now, COOLDOWN, 'watched without a call')
                 self.db.metric('watch_ended')
-            elif now - started > self.cfg.quiet_seconds and idle > self.cfg.quiet_seconds:
+            elif now - started > 90 and idle > 90:
                 self.db.demote(t['mint'], now, COOLDOWN, 'flow went quiet')
                 self.db.metric('watch_quiet')
         active = self.db.watching()
@@ -447,16 +441,7 @@ class Solter:
         try:
             async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as r:
                 if r.status != 200:
-                    if r.status == 429 and url.startswith(DEX):
-                        self.dex_rate_limited_streak = min(self.dex_rate_limited_streak + 1, 5)
-                        wait = min(60, 5 * 2 ** (self.dex_rate_limited_streak - 1))
-                        self.dex_throttled_until = max(self.dex_throttled_until,
-                                                       time.monotonic() + wait)
-                        self.db.metric('dex_429')
-                        LOG.warning('DexScreener 429: slowing requests for %ds', wait)
                     return None
-                if url.startswith(DEX):
-                    self.dex_rate_limited_streak = 0
                 body = bytearray()
                 async for chunk in r.content.iter_chunked(65536):   # read() may return a partial body
                     body += chunk
@@ -468,8 +453,7 @@ class Solter:
 
     async def dex(self, path: str):
         async with self.dex_lock:
-            wait = max(self.cfg.dex_interval - (time.monotonic() - self.last_dex),
-                       self.dex_throttled_until - time.monotonic())
+            wait = self.cfg.dex_interval - (time.monotonic() - self.last_dex)
             if wait > 0:
                 await asyncio.sleep(wait)
             self.last_dex = time.monotonic()
@@ -490,102 +474,6 @@ class Solter:
         self.pairs[mint] = (time.time(), facts)
         return facts
 
-    async def radar_once(self, now: float) -> int:
-        """Quality-first batch screen; retain existing watch/sweep independently.
-
-        Dex data are 5m rolling aggregates, NOT unique-buyers or on-chain proof.
-        Do not notify from one static snapshot. Confirm spaced positive changes,
-        then rank all candidates and allow at most one alert this pass.
-        """
-        tokens = self.db.radar_batch(now, self.cfg.radar_batch, self.cfg.radar_minutes)
-        candidates = []
-        for offset in range(0, len(tokens), 30):
-            chunk = tokens[offset:offset + 30]
-            wanted = {t['mint'] for t in chunk}
-            payload = await self.dex('/tokens/v1/solana/' + ','.join(t['mint'] for t in chunk))
-            if not isinstance(payload, list):
-                self.db.metric('radar_http_unavailable')
-                for t in chunk:
-                    self.db.radar_mark(t['mint'], now, None, None)
-                continue
-            pairs = pick_pairs(payload, wanted)
-            for token in chunk:
-                mint = token['mint']
-                pair = pairs.get(mint)
-                # Locally-known repeat launchers are higher-risk. Not a complete
-                # creator history and never evidence that unknown means safe.
-                if token.get('creator') and self.db.launches(token['creator']) > self.cfg.max_creator_launches > 0:
-                    self.db.metric('radar_known_serial_creator')
-                    self.db.radar_sample(mint, now, None, self.cfg.radar_confirm_seconds)
-                    self.db.radar_mark(mint, now, None, None)
-                    continue
-                mc = (number(pair.get('marketCap')) or number(pair.get('fdv'))) if pair else None
-                volume = number((pair.get('volume') or {}).get('m5')) if pair else None
-                previous_mc = ({'market_cap_usd': token['radar_mc_usd']}
-                               if token['radar_mc_usd'] else None)
-                reading = (selective_signal(pair, previous_mc, self.cfg) if pair else None)
-                previous_sample = self.db.radar_sample(
-                    mint, now, reading, self.cfg.radar_confirm_seconds)
-                self.db.radar_mark(mint, now, mc, volume)
-                if not pair:
-                    self.db.metric('radar_pair_not_listed')
-                if reading and previous_sample:
-                    confirmed = confirm_progress(
-                        reading, previous_sample,
-                        min_mc_rise=self.cfg.radar_min_confirm_mc_rise_pct,
-                        min_extra_buys=self.cfg.radar_min_extra_buys,
-                        min_extra_volume=self.cfg.radar_min_extra_volume_usd)
-                    if confirmed:
-                        mc_rise, new_buys = confirmed
-                        candidates.append((rank(reading, mc_rise, new_buys), token,
-                                           reading, mc_rise, new_buys))
-        # Do not reward the first low-quality hit merely because it sorts first.
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        for _, token, reading, mc_rise, new_buys in candidates:
-            if await self.send_radar(token, reading, now, mc_rise, new_buys):
-                return 1
-        return 0
-
-    async def send_radar(self, token, reading, now: float, mc_rise: float = 0,
-                         new_buys: int = 0) -> bool:
-        """No duplicates, conservative hourly ceiling and global quiet interval."""
-        mint = token['mint']
-        hour_limit = min(self.cfg.radar_max_alerts_per_hour,
-                         self.cfg.radar_quality_max_alerts_per_hour)
-        if not self.db.radar_claim(mint, now, hour_limit, reading.market_cap_usd,
-                                   reading.volume_5m_usd, self.cfg.radar_alert_gap_seconds):
-            return False
-        import html
-        title = html.escape((token.get('symbol') or 'TOKEN')[:32])
-        mc_label = 'FDV (perkiraan)' if reading.mc_is_fdv else 'MC'
-        msg = (f'🎯 <b>SOLTER · KANDIDAT MOMENTUM TERKONFIRMASI</b>\n'
-               f'<b>{title}</b> · {html.escape(token.get("stage") or "new")}\n'
-               f'💰 {mc_label} <b>${reading.market_cap_usd:,.0f}</b> '
-               f'· naik {mc_rise:+.1f}% antar sampel\n'
-               f'📊 Volume 5m <b>${reading.volume_5m_usd:,.0f}</b> '
-               f'· tambahan buy-tercatat +{new_buys}\n'
-               f'🟢 Buy/Sell 5m <b>{reading.buys_5m}/{reading.sells_5m}</b> '
-               f'· Likuiditas ${reading.liquidity_usd:,.0f} '
-               f'· harga 5m {reading.change_5m_pct:+.1f}%\n'
-               f'<code>{html.escape(mint)}</code>\n\n'
-               '<i>Tersaring dari dua pembacaan, bukan audit holder atau jaminan naik. '
-               'Jumlah transaksi beli tidak sama dengan pembeli unik. '
-               'Verifikasi risiko mint, wallet, dan dev sebelum entry.</i>')
-        state, _ = await self.tg.call(msg, mint, None)
-        self.db.radar_finish(mint, state)
-        self.db.metric('radar_alert_' + state)
-        LOG.info('QUALITY RADAR %s %s mc=$%.0f vol5=$%.0f state=%s',
-                 token.get('stage'), mint[:12], reading.market_cap_usd,
-                 reading.volume_5m_usd, state)
-        return state == 'sent'
-
-    async def radar(self):
-        while self.running:
-            start = time.monotonic()
-            if self.cfg.radar_enabled:
-                await self.radar_once(time.time())
-            await asyncio.sleep(max(.1, self.cfg.radar_interval - (time.monotonic() - start)))
-
     async def token_metadata(self, token: dict) -> dict | None:
         mint, uri = token['mint'], token.get('uri')
         if not uri:
@@ -601,47 +489,17 @@ class Solter:
         return data
 
     # evaluation ----------------------------------------------------------
-    async def evaluate_one(self, token):
-        started = time.monotonic()
-        try:
-            await self.consider(token, self.chain_now())
-        except NoBudget:
-            self.note(token['mint'], 'RPC budget waiting')
-        except Exception:
-            LOG.exception('evaluation failed for %s', token['mint'][:12])
-        finally:
-            elapsed = time.monotonic() - started
-            if elapsed >= 2:
-                LOG.info('CHECK %s duration=%.1fs reason=%s', token['mint'][:12],
-                         elapsed, self.reasons.get(token['mint'], 'completed'))
-
     async def evaluator(self):
-        # No batch barrier: a slow request occupies only one worker slot.
-        last = {}
-        try:
-            while self.running:
-                for mint, job in list(self.eval_jobs.items()):
-                    if job.done():
-                        job.result()
-                        del self.eval_jobs[mint]
-                tokens = sorted(self.db.watching(), key=lambda t: last.get(t['mint'], 0))
-                active = {t['mint'] for t in tokens}
-                last = {m: v for m, v in last.items() if m in active}
-                self.prefetched.intersection_update(active | set(self.eval_jobs))
-                for token in tokens:
-                    if len(self.eval_jobs) >= self.cfg.eval_concurrency:
-                        break
-                    mint = token['mint']
-                    if mint in self.eval_jobs or time.monotonic() - last.get(mint, -10) < 2:
-                        continue
-                    last[mint] = time.monotonic()
-                    self.eval_jobs[mint] = asyncio.create_task(self.evaluate_one(token))
-                await asyncio.sleep(.5)
-        finally:
-            for job in self.eval_jobs.values():
-                job.cancel()
-            await asyncio.gather(*self.eval_jobs.values(), return_exceptions=True)
-            self.eval_jobs.clear()
+        while self.running:
+            for token in self.db.watching():
+                try:
+                    await self.consider(token, self.chain_now())
+                except NoBudget:
+                    LOG.warning('RPC budget used up; deep checks wait for tomorrow (UTC)')
+                    break
+                except Exception:
+                    LOG.exception('evaluation failed for %s', token['mint'][:12])
+            await asyncio.sleep(4)
 
     def note(self, mint: str, reason: str):
         """Remember why a watched token was not called (once per change of reason)."""
@@ -649,7 +507,6 @@ class Solter:
             self.reasons[mint] = reason
             self.db.metric(f'no_call:{reason}')
             self.db.update(mint, reason=reason)
-            LOG.info('WAIT %s reason=%s', mint[:12], reason)
 
     async def consider(self, token: dict, now: float):
         mint = token['mint']
@@ -659,52 +516,34 @@ class Solter:
         flow = evaluate(trades, now, self.rules, token['creator'])
         if not flow.ok:
             self.note(mint, flow.reason)
-            # One speculative check per watch session, only on emerging buying.
-            # This avoids spending the daily budget on every inactive token.
-            if (mint not in self.prefetched and flow.buys >= 4 and flow.buyers >= 3
-                    and flow.net_sol > 0 and not flow.creator_sold
-                    and flow.reason in ('few buys', 'few buyers', 'weak net inflow', 'too short')):
-                self.prefetched.add(mint)
-                await self.assess(token, flow, trades, now)
-                self.db.metric('quality_prefetch')
             return
-        context = (token['stage'], token['account'])
+        # The market-cap window is checked on the last traded price first, before any RPC is spent,
+        # and again on the authoritative price the deep check reads.
+        last = token['last_price'] * PUMP_SUPPLY if token['last_price'] else None
+        outside = market_cap_reason(self.quality, last, self.sol_usd)
+        if outside:
+            self.note(mint, outside)
+            return
         assessment = await self.assess(token, flow, trades, now)
         if assessment.reason:
             self.note(mint, assessment.reason)
             return
-        # RPC may have taken seconds: never send from the old flow snapshot.
-        token = self.db.token(mint)
-        if not token or token['state'] != 'watching' or self.db.has_call(mint):
+        outside = market_cap_reason(self.quality, assessment.mcap_sol, self.sol_usd)
+        if outside:
+            self.note(mint, outside)
             return
-        if context != (token['stage'], token['account']):
-            self.checked.pop(mint, None)
-            self.note(mint, 'market changed; rechecking')
-            return
-        now = self.chain_now()
-        flow = evaluate(self.db.trades(mint), now, self.rules, token['creator'])
-        if not flow.ok:
-            self.note(mint, flow.reason)
-            return
-        assessment = replace(assessment, score=score(flow, assessment.holders,
-                                                     assessment.socials, assessment.launches))
-        if assessment.score < max(self.quality.min_score, self.cfg.call_quality_score_floor):
+        if assessment.score < self.quality.min_score:
             self.note(mint, 'low score')
             return
         await self.send_call(token, flow, assessment, now)
 
     async def assess(self, token: dict, flow: Flow, trades: list[Trade], now: float) -> Assessment:
         cached = self.checked.get(token['mint'])
-        context = (token['stage'], token['account'])
-        if cached and (len(cached) < 3 or cached[2] != context):
-            cached = None
-        ttl = (TRANSIENT_CHECK_TTL if cached and cached[1].reason in TRANSIENT_CHECKS
-               else FAILED_CHECK_TTL if cached and cached[1].reason else CHECK_TTL)
-        if cached and now - cached[0] < ttl:
+        if cached and now - cached[0] < (FAILED_CHECK_TTL if cached[1].reason else CHECK_TTL):
             base = cached[1]
         else:
             base = await self.deep_check(token, trades)
-            self.checked[token['mint']] = (now, base, context)
+            self.checked[token['mint']] = (now, base)
         if base.reason:
             return base
         return replace(base, score=score(flow, base.holders, base.socials, base.launches))
@@ -718,8 +557,6 @@ class Solter:
     async def deep_check(self, token: dict, trades: list[Trade]) -> Assessment:
         mint = token['mint']
         mint_info = await self.account(mint, 'jsonParsed')
-        if mint_info is None:
-            return Assessment('mint unavailable')
         safe, note = mint_safety(mint_info)
         if self.cfg.require_mint_check and not safe:
             return Assessment(note)
@@ -770,7 +607,7 @@ class Solter:
         largest = await self.rpc.call('getTokenLargestAccounts', [mint, {'commitment': 'confirmed'}],
                                       kind=DECISION)
         rows = largest.get('value') if isinstance(largest, dict) else None
-        if not isinstance(rows, list) or not rows:
+        if not isinstance(rows, list):
             return Assessment('holders unavailable')
         dev_raw = await self.dev_balance(creator, mint) if creator else None
         holders = holder_stats(rows, {vault}, supply, dev_raw)
@@ -811,6 +648,7 @@ class Solter:
             'dev_pct': a.holders.dev if a.holders else None,
             'launches': a.launches, 'socials': a.socials.count, 'note': 'single attempt'})
         self.db.open_outcome(mint, a.price_sol, now)
+        self.db.metric('call_sent' if state == 'sent' else f'call_{state}')
         LOG.info('CALL %s %s score=%d delivery=%s', token['stage'], mint[:12], a.score, state)
 
     # after the call ------------------------------------------------------
@@ -850,7 +688,7 @@ class Solter:
         reached = max((m for m in MILESTONES if multiple >= m), default=0)
         if reached > o['milestone']:
             updates['milestone'] = reached
-            if self.cfg.followups and self.cfg.followup_milestones and o['message_id']:
+            if self.cfg.followups and o['message_id']:
                 await self.tg.reply(milestone_text(o['symbol'], multiple, o['peak'] * PUMP_SUPPLY,
                                                    self.sol_usd, elapsed), o['message_id'])
         if o['dev_sold'] and not o['dev_alerted']:
@@ -864,7 +702,7 @@ class Solter:
 
     # upkeep --------------------------------------------------------------
     async def maintenance(self):
-        last_log = 0.0
+        last_log, before = time.time(), self.db.metrics()
         while self.running:
             now = time.time()
             self.db.expire(now, self.cfg.reservoir_minutes)
@@ -876,10 +714,14 @@ class Solter:
                 self.reasons.clear()
             if now - last_log >= 300:
                 last_log = now
-                s = self.db.stats()
-                LOG.info('STATUS tokens=%s calls=%s rpc_today=%d/%d sol_usd=%s ws=%s',
-                         s['tokens'], s['calls'], s['rpc_today'], self.cfg.rpc_per_day,
-                         f'{self.sol_usd:.2f}' if self.sol_usd else 'n/a', 'up' if self.ws_up else 'down')
+                after, s = self.db.metrics(), self.db.stats()
+                text, warnings = pulse(before, after, s['tokens'].get('watching', 0))
+                before = after
+                LOG.info('STATUS 5 mnt: %s | RPC %d/%d · SOL %s · WS %s', text, s['rpc_today'],
+                         self.cfg.rpc_per_day, f'${self.sol_usd:.0f}' if self.sol_usd else 'n/a',
+                         'up' if self.ws_up else 'DOWN')
+                for warning in warnings:
+                    LOG.warning('CEK: %s', warning)
             await asyncio.sleep(60)
 
     async def supervise(self, name: str, worker):
@@ -908,7 +750,7 @@ class Solter:
             LOG.info('SOLTER v%s: watch=%d RPC cap=%d/day %d/min, free sources only',
                      __version__, self.cfg.max_watch, self.cfg.rpc_per_day, self.cfg.rpc_per_minute)
             workers = (self.discover, self.sweep, self.scheduler, self.logs, self.transactions,
-                       self.backfill, self.sol_price, self.radar, self.evaluator, self.tracker, self.maintenance)
+                       self.backfill, self.sol_price, self.evaluator, self.tracker, self.maintenance)
             jobs = [asyncio.create_task(self.supervise(w.__name__, w)) for w in workers]
             try:
                 await asyncio.gather(*jobs)

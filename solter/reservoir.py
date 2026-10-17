@@ -17,8 +17,8 @@ from .chain import LAMPORTS, PUMP_SUPPLY, Curve
 
 @dataclass(frozen=True)
 class ReservoirRules:
-    first_check: float = 10          # seconds after discovery before the first look
-    recheck: float = 30              # a quiet token is looked at once more after this
+    first_check: float = 45          # seconds after discovery before the first look
+    recheck: float = 90              # a quiet token is looked at once more after this
     alive_min_sol: float = 0.5       # community SOL: real SOL minus the creator's launch buy
     promote_min_rate: float = 0.5    # SOL per minute flowing in
     promote_min_sol: float = 1.0     # community SOL

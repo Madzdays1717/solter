@@ -11,7 +11,7 @@ from helpers import MINT, addr
 from solter.config import Config
 from solter.flow import Flow
 from solter.quality import Assessment, Holders, Socials
-from solter.report import build, render
+from solter.report import build, pulse, render
 from solter.rpc import BoundedRPC, NoBudget, allowed, day_left
 from solter.sources import pair_facts, parse_portal, pumpswap_pair, sol_usd_from
 from solter.storage import Store
@@ -127,6 +127,7 @@ class TelegramTests(unittest.TestCase):
         self.assertIn('Grade <b>A</b> · 82/100', text)
         self.assertIn('$9.0K', text)
         self.assertIn('+6.3 SOL', text)
+        self.assertIn('vol 0.0 SOL', text)
         self.assertIn('Top10 18.5%', text)
         self.assertIn('launch ke-1', text)
         self.assertIn('href="https://x.com/a&quot;b"', text)
@@ -187,6 +188,19 @@ class ReportTests(StoreCase):
         self.assertIn('Belum ada call', render(build(Store(Path(self.tmp.name) / 'empty.sqlite3'), now)))
 
 
+class PulseTests(unittest.TestCase):
+    def test_status_line_and_warnings(self):
+        before = {'launch_seen': 10, 'trade_from_logs': 5}
+        after = {'launch_seen': 130, 'trade_from_logs': 5, 'reservoir_alive': 9, 'promoted': 4,
+                 'no_call:few buyers': 7, 'no_call:mcap too high': 2, 'call_sent': 1}
+        text, warnings = pulse(before, after, watching=3)
+        self.assertIn('launch 120', text)
+        self.assertIn('ditolak: few buyers 7, mcap too high 2', text)
+        self.assertTrue(any('WebSocket' in w for w in warnings))
+        _, quiet = pulse(after, after, watching=0)
+        self.assertTrue(any('PumpPortal' in w for w in quiet))
+
+
 class ConfigTests(unittest.TestCase):
     def test_defaults_and_v1_names(self):
         cfg = Config.load({'TELEGRAM_BOT_TOKEN': 'secret', 'TELEGRAM_CHAT_ID': '1',
@@ -197,7 +211,19 @@ class ConfigTests(unittest.TestCase):
         public = cfg.public()
         self.assertNotIn('SECRET', str(public))
         self.assertNotIn('secret', str(public))
-        self.assertEqual(cfg.rules().max_wallet_share, .30)
+        self.assertEqual(cfg.rules().max_wallet_share, .35)      # 'seimbang' preset
+        self.assertEqual(cfg.call_mode, 'seimbang')
+
+    def test_call_modes(self):
+        from solter.config import PRESETS
+        default = Config()
+        self.assertEqual({k: getattr(default, k) for k in PRESETS['seimbang']}, PRESETS['seimbang'])
+        strict, loose = Config.load({'CALL_MODE': 'ketat'}), Config.load({'CALL_MODE': 'aggressive'})
+        self.assertEqual((strict.min_buys, strict.max_run_pct, strict.max_mcap_usd), (8, 100.0, 40000.0))
+        self.assertEqual((loose.call_mode, loose.min_buys, loose.max_mcap_usd), ('agresif', 5, 150000.0))
+        self.assertEqual(Config.load({'CALL_MODE': 'agresif', 'MIN_BUYS': '9'}).min_buys, 9)   # .env wins
+        self.assertEqual(loose.rules().max_churn, .70)
+        self.assertEqual(loose.quality_rules().max_mcap_usd, 150000.0)
 
     def test_validation(self):
         with self.assertRaises(ValueError):
@@ -206,6 +232,10 @@ class ConfigTests(unittest.TestCase):
             Config.load({'MIN_NET_SOL': 'lots'})
         with self.assertRaises(ValueError):
             Config.load({'SOLANA_RPC_URL': 'http://insecure'})
+        with self.assertRaises(ValueError):
+            Config.load({'CALL_MODE': 'yolo'})
+        with self.assertRaises(ValueError):
+            Config.load({'MIN_MCAP_USD': '50000', 'MAX_MCAP_USD': '20000'})
 
 
 if __name__ == '__main__':

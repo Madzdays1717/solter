@@ -40,16 +40,22 @@ berbayar (Birdeye, paket berbayar provider RPC), Twitter/X API, API GMGN/Axiom y
 
 ## 3. Ciri memecoin berpotensi dan cara mengukurnya
 
+Angka gerbang di tabel adalah mode **seimbang** (default `CALL_MODE`). Mode `ketat` dan `agresif`
+ada di `.env.example`.
+
 | Ciri | Kenapa penting | Cara Solter mengukur (gratis) | Gerbang default |
 |---|---|---|---|
-| **Uang nyata masuk** | Hanya buy yang menambah SOL di curve; bot volume tidak bisa memalsukannya tanpa modal | Pertumbuhan `real_sol` bonding curve antar sweep (SOL/menit), net inflow dari event | Promosi ≥ 0,5 SOL/mnt dan ≥ 1 SOL komunitas; call ≥ 2 SOL net dalam 3 mnt |
-| **Banyak pembeli berbeda** | Demand yang menyebar lebih tahan daripada 1-2 paus | Pembeli unik dengan buy ≥ 0,05 SOL, creator tidak dihitung | ≥ 8 buy, ≥ 6 pembeli |
+| **Uang nyata masuk** | Hanya buy yang menambah SOL di curve; bot volume tidak bisa memalsukannya tanpa modal | Pertumbuhan `real_sol` bonding curve antar sweep (SOL/menit), net inflow dari event | Promosi ≥ 0,4 SOL/mnt dan ≥ 0,8 SOL komunitas; call ≥ 1,5 SOL net dalam 3 mnt |
+| **Banyak pembeli berbeda** | Demand yang menyebar lebih tahan daripada 1-2 paus | Pembeli unik dengan buy ≥ 0,05 SOL, creator tidak dihitung | ≥ 6 buy, ≥ 5 pembeli |
 | **Momentum masih sekarang** | Call telat = beli puncak | Pembeli aktif 45 dtk terakhir, burst 20 dtk, umur buy terakhir | ≥ 3 aktif, burst ≥ 3, buy terakhir ≤ 30 dtk |
-| **Tidak didominasi satu wallet** | Satu wallet dipecah jadi banyak transaksi | Porsi SOL pembeli terbesar | ≤ 30% |
+| **Tidak didominasi satu wallet** | Satu wallet dipecah jadi banyak transaksi | Porsi SOL pembeli terbesar | ≤ 35% |
 | **Bukan bundle** | Banyak wallet beli di slot yang sama = biasanya satu orang | SOL di slot dengan ≥ 3 wallet berbeda | ≤ 50% |
-| **Tekanan jual wajar** | Banyak jual = distribusi | SOL jual / SOL beli | ≤ 60% |
-| **Belum terlalu tinggi** | Hindari mengejar candle | Kenaikan harga dalam jendela, progres bonding curve | ≤ +100%, progres ≤ 85% |
-| **Holder menyebar** | Top holder besar = risiko dump | `getTokenLargestAccounts`, vault curve/pool dikeluarkan | Top-10 ≤ 30%, terbesar ≤ 10% |
+| **Tekanan jual wajar** | Banyak jual = distribusi | SOL jual / SOL beli | ≤ 70% |
+| **Volume aktif nyata** | Koin yang naik diperdagangkan ramai | Volume beli+jual dalam 3 mnt | ≥ 4 SOL |
+| **Bukan volume palsu (wash)** | Bot beli lalu jual lagi: volume besar tanpa uang masuk | Porsi volume dari wallet yang beli dan jual dalam jendela yang sama | ≤ 60% |
+| **Market cap masih awal** | Terlalu kecil = belum ada tenaga, terlalu besar = sudah telat | MC dari harga on-chain × harga SOL; dicek sebelum dan sesudah cek mendalam | $6 ribu – $80 ribu |
+| **Belum terlalu tinggi** | Hindari mengejar candle | Kenaikan harga dalam jendela, progres bonding curve | ≤ +200%, progres ≤ 95% |
+| **Holder menyebar** | Top holder besar = risiko dump | `getTokenLargestAccounts`, vault curve/pool dikeluarkan | Top-10 ≤ 35%, terbesar ≤ 12% |
 | **Dev bersih** | Dev pegang banyak / jual = rug klasik | Saldo dev sekarang, buy awal dev, dev jual (event) | Dev ≤ 10%, buy awal ≤ 15%, dev jual = blok |
 | **Creator bukan serial launcher** | Satu wallet yang meluncurkan banyak token = pola rug | Hitungan launch per creator dari stream discovery | ≤ 3 launch |
 | **Kontrak aman** | Mint/freeze authority aktif = bisa dicetak/dibekukan | `getAccountInfo` mint (jsonParsed), ekstensi Token-2022 di-whitelist, Mayhem dikecualikan | Wajib |

@@ -22,7 +22,6 @@ CREATE TABLE IF NOT EXISTS tokens (
   migrated_at REAL, promotions INTEGER NOT NULL DEFAULT 0, cooldown_until REAL NOT NULL DEFAULT 0,
   watch_started REAL, watch_until REAL, last_trade_at REAL, last_sig TEXT,
   first_price REAL, last_price REAL,
-  radar_seen_at REAL, radar_mc_usd REAL, radar_volume_5m_usd REAL,
   reason TEXT NOT NULL DEFAULT '');
 CREATE INDEX IF NOT EXISTS tokens_state ON tokens(state, created_at);
 CREATE INDEX IF NOT EXISTS tokens_creator ON tokens(creator);
@@ -53,14 +52,6 @@ CREATE TABLE IF NOT EXISTS outcomes (
 CREATE TABLE IF NOT EXISTS spend (
   day TEXT NOT NULL, kind TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day, kind));
 DROP TABLE IF EXISTS budget;
-CREATE TABLE IF NOT EXISTS radar_alerts (
-  mint TEXT PRIMARY KEY, at REAL NOT NULL, state TEXT NOT NULL,
-  market_cap_usd REAL NOT NULL, volume_5m_usd REAL NOT NULL);
-CREATE INDEX IF NOT EXISTS radar_alerts_at ON radar_alerts(at);
-CREATE TABLE IF NOT EXISTS radar_samples (
- mint TEXT PRIMARY KEY, at REAL NOT NULL, qualified INTEGER NOT NULL,
- mc REAL, volume REAL, buys INTEGER, sells INTEGER
-);
 CREATE TABLE IF NOT EXISTS metrics (key TEXT PRIMARY KEY, n INTEGER NOT NULL DEFAULT 0);
 '''
 
@@ -75,11 +66,6 @@ class Store:
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.execute('PRAGMA busy_timeout=10000')
         self.db.executescript(SCHEMA)
-        # Upgrade existing v2.0.2 databases in place without dropping history.
-        existing = {r['name'] for r in self.db.execute('PRAGMA table_info(tokens)')}
-        for name in ('radar_seen_at', 'radar_mc_usd', 'radar_volume_5m_usd'):
-            if name not in existing:
-                self.db.execute(f'ALTER TABLE tokens ADD COLUMN {name} REAL')
         self.db.commit()
         self.columns = {r['name'] for r in self.db.execute('PRAGMA table_info(tokens)')}
         self.outcome_columns = {r['name'] for r in self.db.execute('PRAGMA table_info(outcomes)')}
@@ -155,73 +141,19 @@ class Store:
         return was
 
     def sweep_batch(self, now: float, limit: int, first_check: float, recheck: float) -> list[dict]:
-        """First-check FIFO prevents busy launches from starving older unchecked coins."""
-        new = self._rows("""SELECT * FROM tokens WHERE state='fresh' AND checks=0 AND created_at<=?
-            ORDER BY created_at ASC LIMIT ?""", (now - first_check, limit))
-        alive = self._rows("""SELECT * FROM tokens WHERE state='alive' AND stage='new'
-            ORDER BY checked_at ASC LIMIT ?""", (limit,))
-        quiet = self._rows("""SELECT * FROM tokens WHERE state='fresh' AND checks>0 AND checked_at<=?
-            ORDER BY checked_at ASC LIMIT ?""", (now - recheck, limit))
+        """Bonding tokens to read: alive ones by inflow, then new launches (newest first), then quiet rechecks."""
+        alive = self._rows('''SELECT * FROM tokens WHERE state='alive' AND stage='new'
+            ORDER BY traction DESC LIMIT ?''', (int(limit * .6),))
+        new = self._rows('''SELECT * FROM tokens WHERE state='fresh' AND checks=0 AND created_at<=?
+            ORDER BY created_at DESC LIMIT ?''', (now - first_check, limit))
+        quiet = self._rows('''SELECT * FROM tokens WHERE state='fresh' AND checks>0 AND checked_at<=?
+            ORDER BY created_at DESC LIMIT ?''', (now - recheck, limit))
         batch, seen = [], set()
-        for row in new + alive + quiet:
+        for row in alive + new + quiet:
             if row['mint'] not in seen and row['account'] and len(batch) < limit:
                 batch.append(row)
                 seen.add(row['mint'])
         return batch
-
-    def radar_batch(self, now: float, limit: int, minutes: int) -> list[dict]:
-        """Fair round robin; independent of Solana log subscription slots."""
-        return self._rows("""SELECT * FROM tokens
-            WHERE state IN ('fresh', 'alive', 'watching', 'dead')
-            AND COALESCE(migrated_at, created_at) >= ?
-            AND mint NOT IN (SELECT mint FROM radar_alerts)
-            ORDER BY COALESCE(radar_seen_at, 0) ASC, created_at DESC LIMIT ?""",
-                          (now - minutes * 60, limit))
-
-    def radar_mark(self, mint: str, at: float, mc: float | None, volume: float | None):
-        self.db.execute("""UPDATE tokens SET radar_seen_at=?,
-            radar_mc_usd=COALESCE(?, radar_mc_usd),
-            radar_volume_5m_usd=COALESCE(?, radar_volume_5m_usd)
-            WHERE mint=?""", (at, mc, volume, mint))
-        self.db.commit()
-
-    def radar_sample(self, mint: str, now: float, reading, seconds: int) -> dict | None:
-        """Return previous spaced observation; do not move baseline every 4s."""
-        row = self.db.execute('SELECT * FROM radar_samples WHERE mint=?', (mint,)).fetchone()
-        if row and now - row['at'] < seconds:
-            return None
-        previous = dict(row) if row and 0 <= now - row['at'] <= 120 else None
-        self.db.execute('''INSERT INTO radar_samples(mint,at,qualified,mc,volume,buys,sells)
-            VALUES(?,?,?,?,?,?,?) ON CONFLICT(mint) DO UPDATE SET
-            at=excluded.at, qualified=excluded.qualified, mc=excluded.mc,
-            volume=excluded.volume, buys=excluded.buys, sells=excluded.sells''',
-            (mint, now, int(reading is not None),
-             reading.market_cap_usd if reading else None,
-             reading.volume_5m_usd if reading else None,
-             reading.buys_5m if reading else None,
-             reading.sells_5m if reading else None))
-        self.db.commit()
-        return previous
-
-    def radar_claim(self, mint: str, now: float, limit: int, mc: float, volume: float,
-                    min_gap: int = 0) -> bool:
-        """Persist deduplication BEFORE send, even if Telegram times out."""
-        count = self.db.execute('SELECT COUNT(*) FROM radar_alerts WHERE at>?',
-                                (now - 3600,)).fetchone()[0]
-        if count >= limit:
-            return False
-        if min_gap and self.db.execute('SELECT 1 FROM radar_alerts WHERE at>? LIMIT 1',
-                                       (now - min_gap,)).fetchone():
-            return False
-        cur = self.db.execute("""INSERT OR IGNORE INTO radar_alerts
-            (mint, at, state, market_cap_usd, volume_5m_usd)
-            VALUES(?, ?, 'attempting', ?, ?)""", (mint, now, mc, volume))
-        self.db.commit()
-        return cur.rowcount == 1
-
-    def radar_finish(self, mint: str, state: str):
-        self.db.execute('UPDATE radar_alerts SET state=? WHERE mint=?', (state, mint))
-        self.db.commit()
 
     def alive(self) -> list[dict]:
         return self._rows("SELECT * FROM tokens WHERE state='alive' ORDER BY traction DESC LIMIT 500")
@@ -377,7 +309,6 @@ class Store:
         return sum(self.budget_by_kind().values())
 
     def cleanup(self, now: float):
-        self.db.execute('DELETE FROM radar_samples WHERE at<?', (now - 2 * 86400,))
         self.db.execute('DELETE FROM trades WHERE at<?', (now - 2 * 86400,))
         self.db.execute('DELETE FROM processed WHERE at<?', (now - 86400,))
         self.db.execute("DELETE FROM tokens WHERE state IN ('dead','expired') AND created_at<?",

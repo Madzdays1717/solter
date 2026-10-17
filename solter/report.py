@@ -15,6 +15,34 @@ FUNNEL = ('launch_seen', 'reservoir_alive', 'promoted', 'trade_from_logs', 'trad
           'trade_from_balance', 'trade_from_backfill', 'migration_seen')
 
 
+def pulse(before: dict, after: dict, watching: int) -> tuple[str, list[str]]:
+    """What happened between two metric snapshots, and what looks broken (Indonesian, for the log)."""
+    d = {k: after.get(k, 0) - before.get(k, 0) for k in after}
+    live = d.get('trade_from_logs', 0)
+    fetched = sum(d.get(k, 0) for k in ('trade_from_log', 'trade_from_cpi', 'trade_from_balance',
+                                         'trade_from_backfill'))
+    reasons = sorted(((k.split(':', 1)[1], n) for k, n in d.items() if k.startswith('no_call:') and n > 0),
+                     key=lambda item: -item[1])[:3]
+    text = (f"launch {d.get('launch_seen', 0)} · hidup {d.get('reservoir_alive', 0)} · "
+            f"dipantau {d.get('promoted', 0)} · trade live {live} · trade fetch {fetched} · "
+            f"call {d.get('call_sent', 0)}")
+    if reasons:
+        text += ' | ditolak: ' + ', '.join(f'{r} {n}' for r, n in reasons)
+    warnings = []
+    if not d.get('launch_seen'):
+        warnings.append('PumpPortal tidak mengirim token baru dalam 5 menit: cek koneksi internet')
+    if watching and not live and not fetched:
+        warnings.append('ada token dipantau tapi tidak ada trade terbaca: WebSocket RPC bermasalah? '
+                        'jalankan python bot.py probe atau pakai RPC free tier sendiri')
+    if d.get('sweep_paused'):
+        warnings.append('sweep berhenti karena jatah RPC hari ini habis: naikkan RPC_REQUESTS_PER_DAY')
+    if d.get('launch_seen') and not d.get('reservoir_alive') and not d.get('promoted'):
+        warnings.append('token baru masuk tapi tidak ada yang hidup/dipantau: cek RPC HTTP (sweep)')
+    if d.get('fallback_no_budget') or d.get('backfill_no_budget'):
+        warnings.append('jatah RPC untuk membaca transaksi habis: sebagian trade tidak terbaca')
+    return text, warnings
+
+
 def _share(values: list[bool]) -> float | None:
     return sum(values) / len(values) if values else None
 

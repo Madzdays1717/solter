@@ -1,7 +1,8 @@
 import unittest
 
 from solter.flow import Flow
-from solter.quality import (Holders, QualityRules, Socials, grade, holder_stats, quality_reason, safe_url,
+from solter.quality import (Holders, QualityRules, Socials, grade, holder_stats, market_cap_reason,
+                            quality_reason, safe_url,
                             score, socials_from)
 
 SUPPLY = 10**15
@@ -43,6 +44,14 @@ class QualityTests(unittest.TestCase):
         self.assertEqual(grade(strong), 'A')
         self.assertEqual(grade(weak), 'C')
         self.assertTrue(0 <= weak <= strong <= 100)
+
+    def test_market_cap_window(self):
+        rules = QualityRules(min_mcap_usd=6000, max_mcap_usd=80000)
+        self.assertEqual(market_cap_reason(rules, 30, 150), 'mcap too low')       # $4.5K
+        self.assertIsNone(market_cap_reason(rules, 100, 150))                      # $15K
+        self.assertEqual(market_cap_reason(rules, 600, 150), 'mcap too high')     # $90K
+        self.assertIsNone(market_cap_reason(rules, 600, None))                     # SOL price unknown
+        self.assertIsNone(market_cap_reason(QualityRules(), 600, 150))             # no window set
 
     def test_quality_gates(self):
         rules = QualityRules()
