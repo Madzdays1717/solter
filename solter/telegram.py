@@ -88,6 +88,29 @@ def call_text(token: dict, flow: Flow, a: Assessment, sol_usd: float | None, now
     return '\n'.join(lines)
 
 
+def market_alert_text(token: dict, strength: int, now: float) -> str:
+    """No implied wallet/holder/mint safety verification or unique-buyer claims."""
+    e = html.escape
+    name = e(token.get('name') or token.get('symbol') or 'TOKEN')
+    symbol = e(token.get('symbol') or '?')
+    buys, sells = token['market_buys'], token['market_sells']
+    vol, liq = token['market_volume_usd'], token['market_liquidity_usd']
+    change, mcap = token['market_change_pct'], token['market_mcap_usd']
+    age = duration(now - (token.get('pair_created_at') or now))
+    return '\\n'.join([
+        f'⚡ <b>SOLTER MOMENTUM ALERT</b> · indikator {strength}/100',
+        f'<b>{name}</b> (${symbol}) · pool {age}',
+        f'📈 Harga 5m <b>{change:+.1f}%</b> · MC {usd(mcap)}',
+        f'💵 Volume 5m <b>{usd(vol)}</b> · likuiditas {usd(liq)}',
+        f'📊 <b>{buys} transaksi beli</b> / {sells} jual (5m)',
+        '⚠️ <b>Belum diverifikasi on-chain.</b> Konsentrasi holder, dev, '
+        'mint/freeze, dan wash trading TIDAK diperiksa.',
+        '<i>Data API pasar berupa snapshot/cached; bukan stream transaksi '
+        'real-time atau jaminan naik. Bukan rekomendasi beli.</i>',
+        '', f'<code>{e(token["mint"])}</code>',
+    ])
+
+
 def milestone_text(symbol: str, multiple: float, mcap_sol: float | None, sol_usd: float | None,
                    minutes: float) -> str:
     return (f'🚀 <b>{html.escape(symbol or "TOKEN")}</b> {multiple:.1f}x sejak call · '

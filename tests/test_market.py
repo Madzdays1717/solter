@@ -27,7 +27,7 @@ class MarketTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = Store(Path(self.tmp.name) / 'live.sqlite')
         self.now = time.time()
-        self.bot = Solter(Config(call_mode='cepat'), self.store)
+        self.bot = Solter(Config(call_mode='cepat', scanner_mode='chain'), self.store)
         self.mint_feed = {'data': [{'relationships': {'base_token':
                                      {'data': {'id': 'solana_' + MINT}}}}]}
 
@@ -74,6 +74,7 @@ class MarketTests(unittest.TestCase):
         asyncio.run(self.bot.scan_market(self.now))
         self.assertEqual(self.store.token(MINT)['stage'], 'migrated')
         self.assertEqual(self.store.metrics()['market_discovered'], 1)
+        self.assertEqual(self.bot.pairs[MINT][1]['address'], migration_pool(MINT))
         asyncio.run(self.bot.scan_market(self.now + 67))
         self.assertEqual(self.store.metrics()['market_updated'], 1)
 

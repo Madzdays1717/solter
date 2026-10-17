@@ -1,3 +1,66 @@
+## v2.4.0 — market-only fast path, no Solana RPC by default (2026-10-18)
+
+- `SCANNER_MODE=market` becomes the default: no RPC client, sweep, holder queries,
+  Solana WebSocket, transaction backfill, log decoding or RPC-dependent call gating
+  in `bot.py run`. `chain` retains the v2.3.0 pipeline.
+- On each free DexScreener batch response, evaluate momentum and directly deliver
+  a clearly labeled **UNVERIFIED MARKET ALERT** (not a verified on-chain call).
+  Gate by real 5m transaction counts (not unique buyers), buy/sell ratio, 5m
+  volume and price change, liquidity and MC; avoid obvious sell-dominated pools.
+- Free GeckoTerminal trending/new pool discovery, plus fresh PumpPortal migration
+  event wakes a DEX batch without waiting for the 65s scan. Revisit recent
+  moving/unindexed migration pools around every 15s, retry missing pools 3min.
+- Only canonical PumpSwap migrations with SOL quote accepted in market mode.
+- Alerts are deduplicated and capped hourly by SQLite. Grade `M` distinguishes
+  unverified momentum from A/B/C safety ratings. Reporting and follow-ups don't
+  invent a fully diluted supply or unique wallets for these alerts.
+- `probe` follows the selected mode; in market mode it uses market HTTP only.
+- All changes unit tested offline; free API cache, rate limits and response
+  latency prevent any guarantee of instantaneous delivery or complete coverage.
+
+## v2.3.0 — event-first decisions, without evaluator tick (2026-10-18)
+
+- A decoded live trade immediately schedules its own per-mint evaluation task:
+  no waiting for the periodic evaluator tick, other mints or a batch barrier.
+- Coalesce fast consecutive events for the *same* mint, never discard an event
+  arriving while its RPC checks are still running: a changed revision triggers
+  another fresh evaluation. Always recheck live flow before a call.
+- Discovery, migration, account sweep and eligible DEX market updates wake the
+  watch-slot scheduler. Subscription syncing checks every ~200ms rather than
+  potentially waiting ~2 seconds in a quiet WebSocket connection.
+- Do not serialize decisions behind an extra global 4-token check lane. Allow
+  up to min(16, max_watch) concurrent token verifications (minimum 4) while
+  respecting the configured real provider RPC minute/day limits and quotas.
+- Metadata/IPFS/socials are prefetched separately for watched tokens, and no
+  longer hold default security checks. REQUIRE_SOCIALS=1 still explicitly
+  fetches socials as a gate. Mint, market/pool, holder and dev checks remain.
+- Cache validated DexScreener pair facts from discovery for reuse by a fresh
+  migrated-token decision; existing refresh TTL is unchanged.
+- Log FLOW verification entry and CALL event-to-delivery milliseconds for
+  diagnosing delays (the latter measures from latest received live trade).
+- Added event-dispatch, replay, scheduler wakeup, optional metadata latency and
+  market cache tests; **92 offline tests pass**. No sustained mainnet trial.
+- Limitations: still only watches a bounded set of pools; new/old token discovery
+  may be delayed by free API refreshes, RPC request ceilings and log decoding.
+  No paid PumpPortal subscribeTokenTrade enabled; no guarantees of coverage,
+  instantaneous Telegram delivery or profitability.
+
+## v2.2.3 — non-blocking real-time evaluation (2026-10-18)
+
+- Replace the `gather()` evaluation barrier with independent per-mint jobs. A
+  slow RPC for one token no longer delays fast flow checks for other watches.
+- Wake the evaluator immediately when new trades arrive; periodic checks still
+  refresh the flow even when the stream is quiet.
+- Cap simultaneous deep verifications at four, but do not throttle the local
+  flow gate on those remote requests.
+- RPC throttling no longer sleeps while holding the shared lock. Safety/decision
+  calls have priority over queued sweep/backfill/fallback when request slots
+  become free; all configured rate and daily ceilings remain enforced.
+- Reconfirm live flow after deep checks so a delayed RPC response cannot send a
+  call on a surge that already ended.
+- Added concurrency and decision-priority regression tests; 88 tests pass
+  offline. No live-mainnet latency/performance measurement or profit guarantee.
+
 ## v2.2.2 — holder RPC transient retry + call funnel (2026-10-18)
 
 - Recheck `holders unavailable` after 20s rather than caching the transient

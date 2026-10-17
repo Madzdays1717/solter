@@ -1,3 +1,7 @@
+> **Penting v2.4.0:** dokumen di bawah menjelaskan mode `SCANNER_MODE=chain`.
+> Untuk `SCANNER_MODE=market`, worker RPC dihapus dari run; baca
+> `README.md` dan `UPGRADE-TERMUX.md` untuk jalur baru.
+
 # Solter v2: arsitektur
 
 ## Modul

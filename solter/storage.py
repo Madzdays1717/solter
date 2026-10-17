@@ -217,6 +217,17 @@ class Store:
               AND mint NOT IN (SELECT mint FROM calls)
             ORDER BY COALESCE(market_at,0) ASC LIMIT ?''', (limit,))]
 
+    def hot_market_candidates(self, now: float, limit: int = 60) -> list[str]:
+        # Recent moving pools excluding already alerted mints.
+        return [r['mint'] for r in self._rows('''SELECT mint FROM tokens
+            WHERE stage='migrated'
+              AND ((market_at>=? AND market_buys>=3) OR (market_at IS NULL AND migrated_at>=?))
+              AND mint NOT IN (SELECT mint FROM calls)
+            ORDER BY CASE WHEN market_at IS NULL THEN 0 ELSE 1 END,
+                     (COALESCE(market_buys,0) - COALESCE(market_sells,0)) DESC,
+                     COALESCE(market_at, migrated_at) DESC LIMIT ?''',
+            (now - 600, now - 180, limit))]
+
     def update_market(self, mint: str, pool: str, data: dict, now: float,
                       eligible: bool | None = None) -> bool:
         """Only verified caller-supplied PumpSwap pairs; never overwrite a sent call."""
@@ -367,7 +378,7 @@ class Store:
         return dict(row) if row else None
 
     def open_outcomes(self) -> list[dict]:
-        return self._rows('''SELECT o.*, c.message_id, c.symbol, c.name, c.stage, t.creator, t.account,
+        return self._rows('''SELECT o.*, c.message_id, c.symbol, c.name, c.stage, c.grade, t.creator, t.account,
             t.stage AS token_stage FROM outcomes o JOIN calls c USING(mint) LEFT JOIN tokens t USING(mint)
             WHERE o.done=0''')
 

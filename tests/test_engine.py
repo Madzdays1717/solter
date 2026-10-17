@@ -319,6 +319,18 @@ class EngineTests(unittest.TestCase):
         self.bot.lags.extend([-2.0, -1.0, -3.0] * 5)    # ordinary latency: no correction
         self.assertEqual(self.bot.clock_offset(), 0.0)
 
+    def test_default_deep_check_does_not_wait_for_external_metadata(self):
+        self.watched()
+        self.buys()
+        async def metadata_never_finishes(token):
+            await asyncio.Event().wait()
+        self.bot.token_metadata = metadata_never_finishes
+        async def check():
+            return await asyncio.wait_for(self.bot.deep_check(self.db.token(MINT),
+                                                                self.db.trades(MINT)), .2)
+        result = asyncio.run(check())
+        self.assertIsNone(result.reason)
+
     def test_metadata_failure_is_retried_later(self):
         token = {'mint': MINT, 'uri': 'https://ipfs.io/ipfs/Qm'}
         answers = [None, {'twitter': 'https://x.com/a'}]

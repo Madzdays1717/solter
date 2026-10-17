@@ -15,7 +15,7 @@ FUNNEL = ('launch_seen', 'reservoir_alive', 'promoted', 'trade_from_logs', 'trad
           'trade_from_balance', 'trade_from_backfill', 'migration_seen')
 
 
-def pulse(before: dict, after: dict, watching: int) -> tuple[str, list[str]]:
+def pulse(before: dict, after: dict, watching: int, market_mode: bool = False) -> tuple[str, list[str]]:
     """What happened between two metric snapshots, and what looks broken (Indonesian, for the log)."""
     d = {k: after.get(k, 0) - before.get(k, 0) for k in after}
     live = d.get('trade_from_logs', 0)
@@ -26,20 +26,26 @@ def pulse(before: dict, after: dict, watching: int) -> tuple[str, list[str]]:
     text = (f"launch {d.get('launch_seen', 0)} · hidup {d.get('reservoir_alive', 0)} · "
             f"dipantau {d.get('promoted', 0)} · trade live {live} · trade fetch {fetched} · "
             f"call {d.get('call_sent', 0)}")
+    if market_mode:
+        text += (f" · DEX discovery {d.get('market_discovered', 0)}"
+                 f" · momentum lolos {d.get('market_signal_confirmed', 0)}"
+                 f" · alert {d.get('market_alert_sent', 0)}")
     if reasons:
         text += ' | ditolak: ' + ', '.join(f'{r} {n}' for r, n in reasons)
     warnings = []
     if not d.get('launch_seen'):
         warnings.append('PumpPortal tidak mengirim token baru dalam 5 menit: cek koneksi internet')
-    if watching and not live and not fetched:
+    if not market_mode and watching and not live and not fetched:
         warnings.append('ada token dipantau tapi tidak ada trade terbaca: WebSocket RPC bermasalah? '
                         'jalankan python bot.py probe atau pakai RPC free tier sendiri')
-    if d.get('sweep_paused'):
+    if not market_mode and d.get('sweep_paused'):
         warnings.append('sweep berhenti karena jatah RPC hari ini habis: naikkan RPC_REQUESTS_PER_DAY')
-    if d.get('launch_seen') and not d.get('reservoir_alive') and not d.get('promoted'):
+    if not market_mode and d.get('launch_seen') and not d.get('reservoir_alive') and not d.get('promoted'):
         warnings.append('token baru masuk tapi tidak ada yang hidup/dipantau: cek RPC HTTP (sweep)')
-    if d.get('fallback_no_budget') or d.get('backfill_no_budget'):
+    if not market_mode and (d.get('fallback_no_budget') or d.get('backfill_no_budget')):
         warnings.append('jatah RPC untuk membaca transaksi habis: sebagian trade tidak terbaca')
+    if market_mode and d.get('market_dex_unavailable'):
+        warnings.append('DEX API gagal/terbatas, snapshot dapat terlambat')
     return text, warnings
 
 
@@ -57,7 +63,7 @@ def build(store, now: float, days: int = 7) -> dict:
     tracked = [c for c in calls if c['entry']]
     peaks = [c['peak'] / c['entry'] for c in tracked]
     grades = {}
-    for g in ('A', 'B', 'C'):
+    for g in ('A', 'B', 'C', 'M'):
         group = [c for c in tracked if c['grade'] == g]
         multiples = [c['peak'] / c['entry'] for c in group]
         grades[g] = {'calls': len(group), 'hit_2x': _share([m >= 2 for m in multiples]),

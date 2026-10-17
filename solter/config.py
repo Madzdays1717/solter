@@ -20,6 +20,15 @@ class Config:
     rpc_http: str = 'https://api.mainnet-beta.solana.com'
     rpc_ws: str = 'wss://api.mainnet-beta.solana.com'
     db_path: Path = ROOT / 'data' / 'solter-v2.sqlite3'
+    # 'market': free DEX snapshots, zero Solana RPC requests during run.
+    # 'chain': older on-chain tracking/verification; depends on RPC and WebSocket.
+    scanner_mode: str = 'market'
+    market_fast_seconds: float = 15.0
+    market_signal_min_buys: int = 12
+    market_signal_min_volume_usd: float = 1500.0
+    market_signal_min_change_pct: float = 2.0
+    market_signal_max_change_pct: float = 85.0
+    market_signal_buy_sell_ratio: float = 1.5
     # Request ceilings this installation keeps by itself (not a provider's credit accounting).
     rpc_per_minute: int = 60
     rpc_per_day: int = 15000
@@ -111,7 +120,10 @@ class Config:
         mode = MODE_ALIASES.get(mode, mode)
         if mode not in PRESETS:
             raise ValueError(f'CALL_MODE must be one of: {", ".join(PRESETS)}')
-        values = {'call_mode': mode, **PRESETS[mode]}   # a variable set in .env wins over the preset
+        scanner_mode = str(env.get('SCANNER_MODE', 'market')).strip().lower()
+        if scanner_mode not in ('market', 'chain'):
+            raise ValueError('SCANNER_MODE must be market or chain')
+        values = {'scanner_mode': scanner_mode, 'call_mode': mode, **PRESETS[mode]}   # a variable set in .env wins over the preset
         for name, (key, low, high) in ENV.items():
             raw = str(env.get(key, '')).strip()
             if not raw:
@@ -133,6 +145,8 @@ class Config:
             ws = http.replace('https://', 'wss://', 1) if http != cls.rpc_http else cls.rpc_ws
         if not (http.startswith('https://') and ws.startswith('wss://')):
             raise ValueError('RPC endpoints must use HTTPS and WSS')
+        if scanner_mode == 'market' and values.get('market_enabled', True) is False:
+            raise ValueError('MARKET_ENABLED must be true for SCANNER_MODE=market')
         if values['min_mcap_usd'] and values['max_mcap_usd'] and values['max_mcap_usd'] < values['min_mcap_usd']:
             raise ValueError('MAX_MCAP_USD must be above MIN_MCAP_USD')
         return cls(tg_token=str(env.get('TELEGRAM_BOT_TOKEN', '')).strip(),
@@ -182,6 +196,12 @@ MODE_ALIASES = {'strict': 'ketat', 'balanced': 'seimbang', 'aggressive': 'agresi
 
 # field -> (environment variable, minimum, maximum); booleans ignore the bounds.
 ENV = {
+    'market_fast_seconds': ('MARKET_FAST_SECONDS', 10, 120),
+    'market_signal_min_buys': ('MARKET_SIGNAL_MIN_BUYS_5M', 3, 500),
+    'market_signal_min_volume_usd': ('MARKET_SIGNAL_MIN_VOLUME_USD_5M', 100, 1000000),
+    'market_signal_min_change_pct': ('MARKET_SIGNAL_MIN_CHANGE_PCT_5M', 0, 50),
+    'market_signal_max_change_pct': ('MARKET_SIGNAL_MAX_CHANGE_PCT_5M', 5, 1000),
+    'market_signal_buy_sell_ratio': ('MARKET_SIGNAL_BUY_SELL_RATIO', 1.0, 10.0),
     'rpc_per_minute': ('RPC_REQUESTS_PER_MIN', 1, 600),
     'rpc_per_day': ('RPC_REQUESTS_PER_DAY', 100, 1_000_000),
     'dex_interval': ('DEX_SECONDS_BETWEEN', .2, 30),

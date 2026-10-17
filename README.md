@@ -1,4 +1,46 @@
-# Solter v2.2.2: scanner scalping momentum Solana (sumber publik/gratis)
+# Solter v2.4.0: market-first alert Solana tanpa ketergantungan RPC
+
+## Default baru v2.4.0: `SCANNER_MODE=market`
+
+**Dari pool tercatat di pasar → ambil snapshot DEX → uji momentum → kirim alert / tolak.**
+Pada `python bot.py run`, mode ini tidak membuat request RPC Solana ataupun
+langganan `logsSubscribe`. Pendeteksian ditopang PumpPortal migration (gratis),
+GeckoTerminal trending/new (penemuan sekitar 65 detik), DexScreener snapshot
+`txns.m5`, `volume.m5`, `priceChange.m5`, `marketCap`, likuiditas, dengan batch
+hingga 30 mint. Migrasi baru membangunkan refresh DEX; pool yang belum terindeks
+dicoba lagi selama 3 menit. Pool aktif yang diketahui disegarkan setiap ~15 detik,
+tergantung cache penyedia/rate limit/koneksi.
+
+**CATATAN KRITIS:** Alert ini **bukan pemeriksaan keamanan token**. Tidak ada
+wallet tracker, unique buyers, pemeriksaan otoritas mint/freeze, holder/dev,
+atau deteksi wash-trading on-chain. Pembelian yang dilaporkan adalah **jumlah
+transaksi**, bukan jumlah wallet unik. MC/liquidity/price mengandalkan API;
+produk seperti ini tetap bisa mengirim peringatan palsu, scam, atau telat.
+Pesan Telegram sengaja menulis **BELUM DIVERIFIKASI ON-CHAIN**, dan grade
+berubah menjadi `M` (market-only), bukan skor keamanan A/B/C.
+
+Mode market mengirim **alert hanya untuk pool PumpSwap migrasi dengan quote
+SOL dan alamat pool migrasi kanonis**. Token Pump.fun yang masih di bonding
+curve, pair lain, atau token tidak terindeks mungkin terlewat. Tidak ada
+klaim cakupan GMGN yang menggunakan infrastruktur berbeda.
+
+Mode `SCANNER_MODE=chain` mempertahankan scanner v2.3.0 dengan on-chain RPC,
+backfill dan kualitas holder. Pilih hanya jika mempunyai RPC memadai dan
+menginginkan call yang memerlukan verifikasi. Kedua mode memakai database
+lama, deduplikasi per mint, batas alert per jam, dan tidak melakukan trading.
+
+`python bot.py probe` pada mode market **tidak memakai RPC**; hasil menguji
+keterjangkauan endpoint pasar. `python bot.py doctor` menunjukkan mode aktif,
+`python bot.py stats` menunjukkan `market_signal_confirmed`, `market_alert_sent`,
+`market_discovered`, `market_dex_unavailable`, dan alasan penolakan.
+Snapshot API mungkin di-cache; jarak 15 detik antarpolling **bukan latensi
+real-time 15 detik**. Pengujian offline bukan pengujian performa mainnet.
+
+Lihat [UPGRADE-TERMUX.md](UPGRADE-TERMUX.md) untuk instalasi tanpa mengganti `.env`.
+
+---
+
+## Panduan historis (fitur on-chain di bawah ini hanya berlaku untuk `SCANNER_MODE=chain`)
 
 Solter menggabungkan **launch baru, migrasi, dan token PumpSwap yang sudah lama tetapi
 mulai ramai lagi**. Kandidat diurutkan berdasarkan momentum dan dipantau menggunakan log
@@ -15,6 +57,32 @@ pemeriksaan kontrak. Setiap call dilacak
 - **Tidak bisa menjamin semua token tertangkap atau profit.** API publik memerlukan waktu indeks,
   koneksi putus bisa menghilangkan event, dan volume bisa direkayasa. Baca [docs/ANALISIS.md](docs/ANALISIS.md) untuk alasan setiap
   filter dan batasannya.
+
+## Pembaruan v2.3.0: tangkap → uji → kirim/tolak
+
+Begitu satu trade **yang sudah diterima dari WebSocket Solana untuk token yang
+sedang dipantau** berhasil dibaca, Solter langsung menjalankan tes momentum
+lokal pada token tersebut (tanpa menunggu pemeriksaan token lain atau tick).
+Jika lolos, RPC keamanan dilakukan paralel sejauh kuota provider memungkinkan.
+Trade baru yang datang saat verifikasi masih berlangsung tidak hilang; alur
+mengevaluasi ulang momentum sebelum mengirim call.
+
+Pemeriksaan metadata eksternal diprefetch terpisah: tidak memblokir jalur
+keputusan standar. Pemeriksaan mint/freeze, keamanan pool, likuiditas, distribusi
+holder dan dev **tidak dihapus**. Jika RPC penting lambat/terbatas, call tetap
+bisa terlambat atau tidak dikirim: bukan benar-benar "tanpa antrean" jaringan.
+
+`CALL ... event_to_delivery_ms=...` memperlihatkan durasi dari transaksi live
+terbaru diterima di proses bot sampai permintaan Telegram selesai. Ini bukan
+latensi ujung-ke-ujung bursa/blockchain maupun pengukuran keterlambatan discovery.
+`FLOW ... safety verification` menandai awal verifikasi token yang momentum
+lokalnya telah memenuhi syarat. Lihat `UPGRADE-TERMUX.md` untuk upgrade aman.
+
+**Keterbatasan:** jalur transaksi langsung hanya tersedia untuk token yang
+sudah dipantau pada WebSocket RPC. Penemuan token baru/lama dari sumber gratis,
+sinkronisasi subscription, fallback decoding, kuota RPC dan Telegram masih bisa
+membatasi kecepatan serta cakupan. Stream trade PumpPortal terpisah dan berbayar,
+tidak diaktifkan oleh Solter. Tidak ada jaminan profit atau semua pump tertangkap.
 
 ## Perbaikan v2.2.2: kandidat tertahan saat RPC holder gagal
 

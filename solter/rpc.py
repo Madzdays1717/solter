@@ -50,20 +50,35 @@ class BoundedRPC:
         self.recent: deque[float] = deque()
         self.lock = asyncio.Lock()
         self.failures = 0
+        self.decision_waiters = 0
 
     async def _take(self, kind: str):
-        async with self.lock:
-            if not allowed(kind, self.store.budget_by_kind(), self.per_day, day_left()):
-                raise NoBudget(f'daily RPC budget reached for {kind}')
+        # Never sleep under the global limiter lock. Priority goes to checks
+        # needed to validate a potential call, ahead of optional backfill and
+        # maintenance, without exceeding the local provider request ceilings.
+        if kind == DECISION:
+            self.decision_waiters += 1
+        try:
             while True:
-                now = time.monotonic()
-                while self.recent and now - self.recent[0] >= 60:
-                    self.recent.popleft()
-                if len(self.recent) < self.per_minute:
-                    break
-                await asyncio.sleep(max(.05, 60 - (now - self.recent[0])))
-            self.store.budget_claim(kind)
-            self.recent.append(time.monotonic())
+                async with self.lock:
+                    if not allowed(kind, self.store.budget_by_kind(), self.per_day, day_left()):
+                        raise NoBudget(f'daily RPC budget reached for {kind}')
+                    now = time.monotonic()
+                    while self.recent and now - self.recent[0] >= 60:
+                        self.recent.popleft()
+                    has_capacity = len(self.recent) < self.per_minute
+                    priority_ok = kind == DECISION or not self.decision_waiters
+                    if has_capacity and priority_ok:
+                        self.store.budget_claim(kind)
+                        self.recent.append(now)
+                        return
+                    wait = (max(.05, 60 - (now - self.recent[0])) if not has_capacity else .1)
+                # Re-check regularly; new decision work must be able to overtake
+                # queued backfill when the next request slot becomes free.
+                await asyncio.sleep(min(wait, .25))
+        finally:
+            if kind == DECISION:
+                self.decision_waiters -= 1
 
     async def call(self, method: str, params: list, kind: str = DECISION):
         """Result of one call, or None. Every HTTP attempt costs one request of the budget."""
