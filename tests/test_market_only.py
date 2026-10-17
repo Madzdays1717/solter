@@ -73,8 +73,8 @@ class MarketOnlyTests(unittest.IsolatedAsyncioTestCase):
         mint, message, image = self.bot.tg.sent[0]
         self.assertEqual(mint, MINT)
         self.assertIn('SOLTER MOMENTUM ALERT', message)
-        self.assertIn('Belum diverifikasi on-chain', message)
-        self.assertIn('transaksi beli', message)
+        self.assertIn('BELUM DIVERIFIKASI ON-CHAIN', message)
+        self.assertIn('Beli <b>23</b>', message)
         self.assertNotIn('Mint & freeze authority dicabut', message)
         self.assertIn('&lt;b&gt;Coin', message)
         self.assertEqual(self.store.call(MINT)['grade'], 'M')

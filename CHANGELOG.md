@@ -163,3 +163,15 @@
 
 - Watcher early-flow pertama: discovery PumpPortal, `logsSubscribe` per kandidat, klasifikasi
   selisih saldo, sinyal berbasis hitungan, harga DexScreener, satu call Telegram per mint.
+
+## v2.4.1 — Telegram presentation & optional banners
+- Alert market disusun menjadi judul, angka momentum 5 menit, peringatan keamanan,
+  contract address yang bisa disalin, dan tombol dua baris (DexScreener,
+  GMGN, Pump.fun, Solscan).
+- Banner profil token DexScreener digunakan sebagai preview besar jika tersedia;
+  ikon token dari pair/profil sebagai fallback; jika tidak ada metadata gambar,
+  pesan teks dikirim normal.
+- Gambar dan tautan sosial dibaca dari snapshot DEX/profile yang sudah diambil
+  untuk discovery; tidak ada RPC atau panggilan metadata tambahan pada jalur call.
+- Metadata HTTPS dan HTML disanitasi, status keamanan tetap belum diverifikasi.
+- Tidak ada perubahan ambang sinyal, database, maupun metode penilaian market.

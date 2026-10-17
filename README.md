@@ -326,3 +326,14 @@ Dokumentasi teknis: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
   [getMultipleAccounts](https://solana.com/docs/rpc/http/getmultipleaccounts),
   [getTokenLargestAccounts](https://solana.com/docs/rpc/http/gettokenlargestaccounts)
 - [DexScreener API](https://docs.dexscreener.com/api/reference)
+
+### Visual Telegram (v2.4.1)
+
+Market alert memuat momentum 5 menit, market cap, volume, likuiditas, rasio
+transaksi beli/jual (BUKAN jumlah wallet unik), indikator momentum, status risiko
+on-chain, contract address, dan tombol Chart/GMGN/Pump.fun/Solscan. Bila banner
+tersedia pada profil DexScreener yang telah diterima scanner, Telegram berusaha
+memunculkan preview besar di atas pesan; ikon dipakai jika banner tidak tersedia.
+Pemuatan preview merupakan proses Telegram sendiri dan tidak selalu berhasil
+untuk semua URL gambar. Scanner tidak menunggu download banner sebelum call.
+Lihat `UPGRADE-TERMUX-2.4.1.md` untuk pemasangan.

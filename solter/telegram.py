@@ -47,10 +47,12 @@ def duration(seconds: float) -> str:
 
 def links(mint: str) -> str:
     m = quote(mint, safe='')
-    return json.dumps({'inline_keyboard': [[
-        {'text': 'DexScreener', 'url': f'https://dexscreener.com/solana/{m}'},
-        {'text': 'GMGN', 'url': f'https://gmgn.ai/sol/token/{m}'},
-        {'text': 'Pump.fun', 'url': f'https://pump.fun/coin/{m}'}]]})
+    return json.dumps({'inline_keyboard': [
+        [{'text': '📊 Chart', 'url': f'https://dexscreener.com/solana/{m}'},
+         {'text': '⚡ GMGN', 'url': f'https://gmgn.ai/sol/token/{m}'}],
+        [{'text': '🚀 Pump.fun', 'url': f'https://pump.fun/coin/{m}'},
+         {'text': '🔎 Solscan', 'url': f'https://solscan.io/token/{m}'}],
+    ]})
 
 
 def call_text(token: dict, flow: Flow, a: Assessment, sol_usd: float | None, now: float,
@@ -88,27 +90,46 @@ def call_text(token: dict, flow: Flow, a: Assessment, sol_usd: float | None, now
     return '\n'.join(lines)
 
 
-def market_alert_text(token: dict, strength: int, now: float) -> str:
-    """No implied wallet/holder/mint safety verification or unique-buyer claims."""
+def market_alert_text(token: dict, strength: int, now: float,
+                      socials: dict[str, str] | None = None) -> str:
+    """Compact, copyable and explicit that market indicators are not safety checks."""
+    from .market_media import public_https
     e = html.escape
-    name = e(token.get('name') or token.get('symbol') or 'TOKEN')
-    symbol = e(token.get('symbol') or '?')
+    symbol = e(str(token.get('symbol') or '?')[:32])
+    name = e(str(token.get('name') or token.get('symbol') or 'Token')[:80])
     buys, sells = token['market_buys'], token['market_sells']
     vol, liq = token['market_volume_usd'], token['market_liquidity_usd']
     change, mcap = token['market_change_pct'], token['market_mcap_usd']
-    age = duration(now - (token.get('pair_created_at') or now))
-    return '\\n'.join([
-        f'⚡ <b>SOLTER MOMENTUM ALERT</b> · indikator {strength}/100',
-        f'<b>{name}</b> (${symbol}) · pool {age}',
-        f'📈 Harga 5m <b>{change:+.1f}%</b> · MC {usd(mcap)}',
-        f'💵 Volume 5m <b>{usd(vol)}</b> · likuiditas {usd(liq)}',
-        f'📊 <b>{buys} transaksi beli</b> / {sells} jual (5m)',
-        '⚠️ <b>Belum diverifikasi on-chain.</b> Konsentrasi holder, dev, '
-        'mint/freeze, dan wash trading TIDAK diperiksa.',
-        '<i>Data API pasar berupa snapshot/cached; bukan stream transaksi '
-        'real-time atau jaminan naik. Bukan rekomendasi beli.</i>',
-        '', f'<code>{e(token["mint"])}</code>',
-    ])
+    pair_seconds = max(0, now - (token.get('pair_created_at') or now))
+    if pair_seconds >= 86400:
+        age = f'{int(pair_seconds // 86400)} hari {int(pair_seconds % 86400 // 3600)} jam'
+    else:
+        age = duration(pair_seconds)
+    ratio = buys / max(1, sells)
+    lines = [
+        '⚡ <b>SOLTER MOMENTUM ALERT</b>',
+        f'<b>{name}</b>  ·  ${symbol}',
+        f'🔁 PumpSwap  •  Pool {age}', '',
+        '📈 <b>MOMENTUM 5 MENIT</b>',
+        f'• Harga <b>{change:+.1f}%</b>   |   MC <b>{usd(mcap)}</b>',
+        f'• Volume <b>{usd(vol)}</b>   |   Likuiditas <b>{usd(liq)}</b>',
+        f'• Beli <b>{buys}</b>   |   Jual <b>{sells}</b>   |   Rasio <b>{ratio:.1f}×</b>',
+        f'• Momentum <b>{strength}/100</b> <i>(bukan skor keamanan)</i>',
+        '<i>Beli/jual = jumlah transaksi, bukan wallet unik.</i>', '',
+        '🛡️ <b>STATUS KEAMANAN</b>',
+        '⚠️ <b>BELUM DIVERIFIKASI ON-CHAIN</b>',
+        'Holder, dev, mint/freeze &amp; wash trading belum diperiksa.',
+    ]
+    social_links = []
+    for label in ('X', 'Telegram', 'Website'):
+        url = public_https((socials or {}).get(label))
+        if url:
+            social_links.append(f'<a href="{e(url, quote=True)}">{label}</a>')
+    if social_links:
+        lines += ['', '🔗 ' + '  ·  '.join(social_links)]
+    lines += ['', '📋 <b>CONTRACT ADDRESS</b>', f'<code>{e(token["mint"])}</code>',
+              '<i>Snapshot DEX dapat terlambat. Bukan jaminan profit atau rekomendasi beli.</i>']
+    return '\n'.join(lines)
 
 
 def milestone_text(symbol: str, multiple: float, mcap_sol: float | None, sol_usd: float | None,

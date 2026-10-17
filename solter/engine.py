@@ -32,6 +32,7 @@ from .rpc import BACKFILL, DECISION, FALLBACK, QUOTAS, SWEEP, BoundedRPC, NoBudg
 from .sources import DEX, PUMP_WS, pair_facts, parse_portal, pumpswap_pair, sol_usd_from, dex_list_mints
 from .market import GECKO, by_mint, gecko_mints, market_snapshot, market_strength, market_ready
 from .market_signal import evaluate_market
+from .market_media import extract_profile_media, combine_media
 from .report import pulse
 from .storage import HORIZONS, Store
 from .telegram import Telegram, call_text, market_alert_text, dev_sold_text, milestone_text
@@ -77,6 +78,7 @@ class Solter:
         self.lags: deque = deque(maxlen=200)    # event timestamp minus arrival time, live trades
         self.clock_warned = 0.0
         self.market_seen: dict[str, float] = {}
+        self.market_media: dict[str, tuple[float, dict]] = {}  # cached public artwork, no fetch on call
         # Live migrations wake the free DEX snapshot refresh without any RPC work.
         self.market_urgent: set[str] = set()
         self.market_fast_wakeup = asyncio.Event()
@@ -617,6 +619,18 @@ class Solter:
             ('/token-profiles/latest/v1', '/token-boosts/top/v1')))
         for feed in profiles:
             discovered.extend(dex_list_mints(feed))
+            for entry in (feed if isinstance(feed, list) else []):
+                item = extract_profile_media(entry)
+                if item:
+                    mint, media = item
+                    old = self.market_media.get(mint, (0, {}))[1]
+                    self.market_media[mint] = (now, {
+                        'header': media.get('header') or old.get('header'),
+                        'icon': media.get('icon') or old.get('icon'),
+                        'socials': {**old.get('socials', {}), **media.get('socials', {})}})
+        if len(self.market_media) > 1200:
+            self.market_media = dict(sorted(self.market_media.items(),
+                                            key=lambda entry: entry[1][0], reverse=True)[:600])
         # Fair rotation ensures old tokens can be rediscovered after a revival.
         discovered.extend(self.db.market_candidates(90))
         mints = list(dict.fromkeys(discovered))[:120]
@@ -677,14 +691,18 @@ class Solter:
                 created = self.db.update_market(mint, pool, snapshot, now, eligible)
                 self.db.metric('market_discovered' if created else 'market_updated')
                 if self.cfg.scanner_mode == 'market':
-                    # No awaited safety RPC and no log subscription or wallet backfill.
-                    await self.consider_market(mint, now, facts)
+                    # Artwork/socials from data already fetched; no added network request.
+                    cached = self.market_media.get(mint)
+                    profile = cached[1] if cached and now - cached[0] <= 3600 else None
+                    media = combine_media(pair, profile)
+                    await self.consider_market(mint, now, facts, media)
                 elif eligible:
                     self.scheduler_wakeup.set()
             except (TypeError, ValueError, KeyError):
                 self.db.metric('market_bad_pair')
 
-    async def consider_market(self, mint: str, now: float, facts: dict):
+    async def consider_market(self, mint: str, now: float, facts: dict,
+                              media: dict | None = None):
         if self.db.has_call(mint):
             return
         token = self.db.token(mint)
@@ -707,9 +725,10 @@ class Solter:
         if not self.db.claim_call(mint, 'migrated', self.cfg.max_calls_per_hour, now):
             self.note(mint, 'hourly call cap')
             return
-        text = market_alert_text(token, decision.strength, now)
+        media = media or {}
+        text = market_alert_text(token, decision.strength, now, media.get('socials'))
         decision_started = time.monotonic()
-        state, msg_id = await self.tg.call(text, mint, None)
+        state, msg_id = await self.tg.call(text, mint, media.get('image'))
         delivery_ms = round((time.monotonic() - decision_started) * 1000)
         price = facts.get('price_sol')
         mcap = token['market_mcap_usd'] / self.sol_usd if self.sol_usd else None
