@@ -1,10 +1,15 @@
-# Update v2.0.2
+# Solter v2.1.0 · Radar Volume + MC Aktif
 
-Lihat [panduan upgrade](UPGRADE-v2.0.2.md) untuk perubahan terbaru dan pengaturan .env lama.
+**Baru:** radar momentum independen yang memeriksa hingga 30 token per request DexScreener.
+Radar melihat volume 5 menit, jumlah buy/sell, dan MC bergerak, **tanpa slot live wallet/logs**.
+Notifikasi `📡 SOLTER RADAR` bersifat dini dan *belum terverifikasi keamanannya*;
+`⚡ SOLTER CALL` adalah hasil pemeriksaan on-chain yang lebih ketat dan tetap dibatasi.
+
+Lihat [panduan upgrade 2.1.0](UPGRADE-v2.1.0.md) untuk Termux dan pengaturan `.env`.
 
 # Solter v2: caller memecoin awal, 100% sumber gratis
 
-Solter memantau setiap token baru Pump.fun, memilih yang uang masuknya paling cepat, membaca
+Solter menerima launch yang terlihat melalui stream Pump.fun, memantau volume/MC via radar, memilih aliran SOL yang aktif, membaca
 trade-nya langsung dari log Solana, lalu mengirim **satu** call Telegram hanya jika aliran beli
 nyata (dalam SOL), distribusi holder, dev, creator, dan kontraknya lolos. Setiap call dilacak
 60 menit (2x/3x/5x/10x, dev jual) supaya kualitas filter bisa dibuktikan dan disetel.

@@ -49,3 +49,11 @@ Evaluasi paralel terbatas, cache kegagalan sementara 10 detik, prefetch kandidat
 
 - Watcher early-flow pertama: discovery PumpPortal, `logsSubscribe` per kandidat, klasifikasi
   selisih saldo, sinyal berbasis hitungan, harga DexScreener, satu call Telegram per mint.
+
+## v2.1.0 — Radar Volume/MC Aktif
+- Radar gratis DexScreener 30 alamat per request, independen dari slot logsSubscribe dan quality-check.
+- Deteksi volume 5m, buy/sell, price momentum, kenaikan MC, fallback FDV berlabel estimasi.
+- Dedup radar dengan batas terpisah dari CALL terverifikasi, plus 429 adaptive cooldown.
+- FIFO token yang belum disapu, pemeriksaan awal dari 45s ke 10s.
+- Skema SQLite lama ditambah tiga kolom tanpa menghapus history.
+- Empat tes radar tambahan; 83 tes total lulus.

@@ -22,7 +22,7 @@ class Config:
     # Request ceilings this installation keeps by itself (not a provider's credit accounting).
     rpc_per_minute: int = 60
     rpc_per_day: int = 15000
-    dex_interval: float = 1.0
+    dex_interval: float = 0.4
     # Reservoir and live watch
     sweep_seconds: int = 30
     sweep_accounts: int = 200
@@ -58,6 +58,18 @@ class Config:
     min_score: int = 0
     min_liquidity_usd: float = 5000.0
     # Calls and follow-up
+    # Independent free DexScreener momentum radar; no wallet calls per candidate.
+    radar_enabled: bool = True
+    radar_interval: float = 4.0
+    radar_batch: int = 120
+    radar_minutes: int = 30
+    radar_min_mc_usd: float = 3000
+    radar_max_mc_usd: float = 150000
+    radar_min_volume_5m_usd: float = 750
+    radar_min_buys_5m: int = 8
+    radar_min_buy_ratio: float = 1.2
+    radar_min_mc_change_pct: float = 4.0
+    radar_max_alerts_per_hour: int = 60
     max_calls_per_hour: int = 5
     track_minutes: int = 60
     followups: bool = True
@@ -130,6 +142,17 @@ class Config:
 
 # field -> (environment variable, minimum, maximum); booleans ignore the bounds.
 ENV = {
+    'radar_enabled': ('RADAR_ENABLED', 0, 1),
+    'radar_interval': ('RADAR_INTERVAL_SECONDS', 3, 60),
+    'radar_batch': ('RADAR_BATCH_TOKENS', 30, 300),
+    'radar_minutes': ('RADAR_TRACK_MINUTES', 5, 120),
+    'radar_min_mc_usd': ('RADAR_MIN_MC_USD', 0, 1000000),
+    'radar_max_mc_usd': ('RADAR_MAX_MC_USD', 1000, 1000000000),
+    'radar_min_volume_5m_usd': ('RADAR_MIN_VOLUME_5M_USD', 0, 100000000),
+    'radar_min_buys_5m': ('RADAR_MIN_BUYS_5M', 1, 10000),
+    'radar_min_buy_ratio': ('RADAR_MIN_BUY_SELL_RATIO', 1, 20),
+    'radar_min_mc_change_pct': ('RADAR_MIN_MC_CHANGE_PCT', 0, 1000),
+    'radar_max_alerts_per_hour': ('RADAR_MAX_ALERTS_PER_HOUR', 1, 500),
     'eval_concurrency': ('EVAL_CONCURRENCY', 1, 8),
     'quiet_seconds': ('QUIET_SECONDS', 30, 300),
     'rpc_per_minute': ('RPC_REQUESTS_PER_MIN', 1, 600),

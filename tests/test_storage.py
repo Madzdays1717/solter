@@ -29,14 +29,14 @@ class StorageTests(unittest.TestCase):
         self.assertEqual(self.db.launches(CREATOR), 2)
         self.assertEqual(self.db.launches(None), 0)
 
-    def test_sweep_batch_prefers_alive_then_newest(self):
+    def test_sweep_batch_prefers_oldest_unchecked_to_prevent_starvation(self):
         self.add(mint=addr('old'), ago=300)
         self.add(mint=addr('new'), ago=60)
         self.add(mint=addr('baby'), ago=5)                  # too young for a first look
         self.add(mint=addr('hot'), ago=400)
         self.db.update(addr('hot'), state='alive', traction=5, checks=1)
         batch = [t['mint'] for t in self.db.sweep_batch(self.now, 10, 45, 90)]
-        self.assertEqual(batch, [addr('hot'), addr('new'), addr('old')])
+        self.assertEqual(batch, [addr('old'), addr('new'), addr('hot')])
 
     def test_watch_cycle(self):
         self.add()

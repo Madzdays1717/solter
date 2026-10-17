@@ -25,6 +25,7 @@ from .config import Config
 from .events import (Trade, cpi_payloads, decode_amm_trade, decode_pump_trade, log_payloads,
                      trades_from_logs, trades_from_tx)
 from .flow import Flow, evaluate
+from .momentum import number, pick_pairs, signal
 from .quality import Assessment, holder_stats, quality_reason, score, socials_from
 from .reservoir import candidates, classify, dev_buy_pct
 from .rpc import BACKFILL, DECISION, FALLBACK, QUOTAS, SWEEP, BoundedRPC, NoBudget
@@ -70,6 +71,8 @@ class Solter:
         self.reasons: dict = {}
         self.dex_lock = asyncio.Lock()
         self.last_dex = 0.0
+        self.dex_throttled_until = 0.0
+        self.dex_rate_limited_streak = 0
         self.lags: deque = deque(maxlen=200)    # event timestamp minus arrival time, live trades
         self.clock_warned = 0.0
         self.eval_jobs = {}
@@ -444,7 +447,16 @@ class Solter:
         try:
             async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as r:
                 if r.status != 200:
+                    if r.status == 429 and url.startswith(DEX):
+                        self.dex_rate_limited_streak = min(self.dex_rate_limited_streak + 1, 5)
+                        wait = min(60, 5 * 2 ** (self.dex_rate_limited_streak - 1))
+                        self.dex_throttled_until = max(self.dex_throttled_until,
+                                                       time.monotonic() + wait)
+                        self.db.metric('dex_429')
+                        LOG.warning('DexScreener 429: slowing requests for %ds', wait)
                     return None
+                if url.startswith(DEX):
+                    self.dex_rate_limited_streak = 0
                 body = bytearray()
                 async for chunk in r.content.iter_chunked(65536):   # read() may return a partial body
                     body += chunk
@@ -456,7 +468,8 @@ class Solter:
 
     async def dex(self, path: str):
         async with self.dex_lock:
-            wait = self.cfg.dex_interval - (time.monotonic() - self.last_dex)
+            wait = max(self.cfg.dex_interval - (time.monotonic() - self.last_dex),
+                       self.dex_throttled_until - time.monotonic())
             if wait > 0:
                 await asyncio.sleep(wait)
             self.last_dex = time.monotonic()
@@ -476,6 +489,83 @@ class Solter:
         facts = pair_facts(pumpswap_pair(await self.dex(f'/token-pairs/v1/solana/{mint}'), mint))
         self.pairs[mint] = (time.time(), facts)
         return facts
+
+    async def radar_once(self, now: float) -> int:
+        """Fast, batch radar. A missing DEX pair does not block the RPC/curve path.
+
+        DexScreener's documented /tokens/v1 endpoint accepts up to 30 token addresses.
+        Radar uses no per-wallet checks and no Solana logsSubscribe slot.
+        """
+        tokens = self.db.radar_batch(now, self.cfg.radar_batch, self.cfg.radar_minutes)
+        delivered = 0
+        for offset in range(0, len(tokens), 30):
+            chunk = tokens[offset:offset + 30]
+            wanted = {t['mint'] for t in chunk}
+            payload = await self.dex('/tokens/v1/solana/' + ','.join(t['mint'] for t in chunk))
+            if not isinstance(payload, list):
+                self.db.metric('radar_http_unavailable')
+                # Rotate even on a failed request; otherwise the same 30 tokens starve all others.
+                for t in chunk:
+                    self.db.radar_mark(t['mint'], time.time(), None, None)
+                continue
+            pairs = pick_pairs(payload, wanted)
+            for token in chunk:
+                mint = token['mint']
+                pair = pairs.get(mint)
+                mc = (number(pair.get('marketCap')) or number(pair.get('fdv'))) if pair else None
+                volume = number((pair.get('volume') or {}).get('m5')) if pair else None
+                previous = {'market_cap_usd': token['radar_mc_usd']} if token['radar_mc_usd'] else None
+                # Compare against the previous *successful* observation before updating the DB.
+                candidate = signal(pair, previous,
+                                   min_mc=self.cfg.radar_min_mc_usd,
+                                   max_mc=self.cfg.radar_max_mc_usd,
+                                   min_volume=self.cfg.radar_min_volume_5m_usd,
+                                   min_buys=self.cfg.radar_min_buys_5m,
+                                   min_buy_ratio=self.cfg.radar_min_buy_ratio,
+                                   min_change_pct=self.cfg.radar_min_mc_change_pct) if pair else None
+                self.db.radar_mark(mint, time.time(), mc, volume)
+                if candidate and await self.send_radar(token, candidate, time.time()):
+                    delivered += 1
+                elif not pair:
+                    self.db.metric('radar_pair_not_listed')
+        return delivered
+
+    async def send_radar(self, token, reading, now: float) -> bool:
+        """Preliminary, non-verified momentum notice with independent hourly ceiling."""
+        mint = token['mint']
+        if not self.db.radar_claim(mint, now, self.cfg.radar_max_alerts_per_hour,
+                                   reading.market_cap_usd, reading.volume_5m_usd):
+            return False
+        import html
+        title = html.escape((token.get('symbol') or 'TOKEN')[:32])
+        delta = (f'{reading.observed_mc_change_pct:+.1f}% sejak sampel sebelumnya'
+                 if reading.observed_mc_change_pct is not None else 'belum ada sampel pembanding')
+        mc_label = 'FDV (estimasi MC)' if reading.mc_is_fdv else 'MC'
+        liquidity = (f' · Likuiditas ${reading.liquidity_usd:,.0f}'
+                     if reading.liquidity_usd is not None else '')
+        msg = (f'📡 <b>SOLTER RADAR · MOMENTUM AWAL</b>\n'
+               f'<b>{title}</b> · {html.escape(token.get("stage") or "new")}\n'
+               f'💰 {mc_label} <b>${reading.market_cap_usd:,.0f}</b> · {delta}\n'
+               f'📊 Volume 5m <b>${reading.volume_5m_usd:,.0f}</b>\n'
+               f'🟢 Buy/Sell 5m <b>{reading.buys_5m}/{reading.sells_5m}</b>{liquidity} '
+               f'· harga 5m {reading.change_5m_pct:+.1f}%\n'
+               f'<code>{html.escape(mint)}</code>\n\n'
+               '<i>Radar cepat, BUKAN hasil audit keamanan atau jaminan naik. '
+               'Periksa likuiditas, mint, holder, dan risiko rugpull sebelum trading.</i>')
+        state, _ = await self.tg.call(msg, mint, None)
+        self.db.radar_finish(mint, state)
+        self.db.metric('radar_alert_' + state)
+        LOG.info('RADAR %s %s mc=$%.0f vol5=$%.0f state=%s',
+                 token.get('stage'), mint[:12], reading.market_cap_usd,
+                 reading.volume_5m_usd, state)
+        return state == 'sent'
+
+    async def radar(self):
+        while self.running:
+            start = time.monotonic()
+            if self.cfg.radar_enabled:
+                await self.radar_once(time.time())
+            await asyncio.sleep(max(.1, self.cfg.radar_interval - (time.monotonic() - start)))
 
     async def token_metadata(self, token: dict) -> dict | None:
         mint, uri = token['mint'], token.get('uri')
@@ -799,7 +889,7 @@ class Solter:
             LOG.info('SOLTER v%s: watch=%d RPC cap=%d/day %d/min, free sources only',
                      __version__, self.cfg.max_watch, self.cfg.rpc_per_day, self.cfg.rpc_per_minute)
             workers = (self.discover, self.sweep, self.scheduler, self.logs, self.transactions,
-                       self.backfill, self.sol_price, self.evaluator, self.tracker, self.maintenance)
+                       self.backfill, self.sol_price, self.radar, self.evaluator, self.tracker, self.maintenance)
             jobs = [asyncio.create_task(self.supervise(w.__name__, w)) for w in workers]
             try:
                 await asyncio.gather(*jobs)
