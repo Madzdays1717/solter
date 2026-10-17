@@ -168,6 +168,32 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(self.db.token(MINT)['reason'], 'top holders concentrated')
         self.assertEqual(self.db.metrics()['no_call:top holders concentrated'], 1)
 
+    def test_holder_rpc_outage_retries_in_20s_without_unsafe_call(self):
+        self.watched()
+        self.buys()
+        current = {'available': False}
+        def check_holders(params):
+            return holders() if current['available'] else None
+        self.bot.rpc = rpc_for(largest=check_holders)
+        start = time.time()
+        asyncio.run(self.bot.consider(self.db.token(MINT), start))
+        self.assertEqual(len(self.bot.tg.sent), 0)
+        self.assertEqual(self.db.token(MINT)['reason'], 'holders unavailable')
+        self.assertEqual(self.db.metrics()['holders_rpc_unavailable'], 1)
+        self.assertEqual(self.db.metrics()['flow_confirmed'], 1)
+        current['available'] = True
+        # Do not hammer the RPC with each 1-second evaluation tick.
+        asyncio.run(self.bot.consider(self.db.token(MINT), start + 10))
+        self.assertEqual(len(self.bot.tg.sent), 0)
+        checks = [x for x in self.bot.rpc.calls if x[0] == 'getTokenLargestAccounts']
+        self.assertEqual(len(checks), 1)
+        # Good flow remains fresh and the temporary failure is retried soon.
+        asyncio.run(self.bot.consider(self.db.token(MINT), start + 21))
+        checks = [x for x in self.bot.rpc.calls if x[0] == 'getTokenLargestAccounts']
+        self.assertEqual(len(checks), 2)
+        self.assertEqual(len(self.bot.tg.sent), 1)
+        self.assertEqual(self.db.metrics()['quality_confirmed'], 1)
+
     def test_curve_creator_overrides_and_its_sale_blocks(self):
         self.bot.rpc = rpc_for(curve=curve_bytes(rsol=8 * 10**9, vsol=38 * 10**9, creator=addr('real-dev')))
         self.watched()

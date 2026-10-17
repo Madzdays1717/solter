@@ -40,7 +40,8 @@ TX_OPTIONS = {'encoding': 'jsonParsed', 'commitment': 'confirmed', 'maxSupported
 MILESTONES = (2, 3, 5, 10)
 METADATA_RETRY = 300    # a metadata fetch that failed is tried again after this
 CHECK_TTL = 45          # seconds a passing deep check is reused
-FAILED_CHECK_TTL = 120  # a failing one changes slowly (holders, dev): look again less often
+FAILED_CHECK_TTL = 120  # confirmed quality failures can be reused briefly
+HOLDER_RETRY_TTL = 20  # unavailable RPC data is not evidence that holders are unsafe
 COOLDOWN = 40          # seconds before a demoted token may be watched again
 
 
@@ -68,6 +69,8 @@ class Solter:
         self.metadata: dict = {}
         self.pairs: dict = {}
         self.reasons: dict = {}
+        self.flow_qualified: set[str] = set()
+        self.quality_qualified: set[str] = set()
         self.dex_lock = asyncio.Lock()
         self.last_dex = 0.0
         self.lags: deque = deque(maxlen=200)    # event timestamp minus arrival time, live trades
@@ -645,6 +648,9 @@ class Solter:
         if not flow.ok:
             self.note(mint, flow.reason)
             return
+        if mint not in self.flow_qualified:
+            self.flow_qualified.add(mint)
+            self.db.metric('flow_confirmed')
         # The market-cap window is checked on the last traded price first, before any RPC is spent,
         # and again on the authoritative price the deep check reads.
         last = token['last_price'] * PUMP_SUPPLY if token['last_price'] else None
@@ -663,11 +669,22 @@ class Solter:
         if assessment.score < self.quality.min_score:
             self.note(mint, 'low score')
             return
+        if mint not in self.quality_qualified:
+            self.quality_qualified.add(mint)
+            self.db.metric('quality_confirmed')
         await self.send_call(token, flow, assessment, now)
 
     async def assess(self, token: dict, flow: Flow, trades: list[Trade], now: float) -> Assessment:
         cached = self.checked.get(token['mint'])
-        if cached and now - cached[0] < (FAILED_CHECK_TTL if cached[1].reason else CHECK_TTL):
+        if cached:
+            # A temporary RPC outage (missing holder data) must not block a
+            # legitimate 3-minute momentum window for two full minutes.
+            # Still do not issue a call without verified holder distribution.
+            ttl = (HOLDER_RETRY_TTL if cached[1].reason == 'holders unavailable' else
+                   FAILED_CHECK_TTL if cached[1].reason else CHECK_TTL)
+        else:
+            ttl = 0
+        if cached and now - cached[0] < ttl:
             base = cached[1]
         else:
             base = await self.deep_check(token, trades)
@@ -743,6 +760,7 @@ class Solter:
         largest = results[0] if isinstance(results[0], dict) else None
         rows = largest.get('value') if isinstance(largest, dict) else None
         if not isinstance(rows, list):
+            self.db.metric('holders_rpc_unavailable')
             return Assessment('holders unavailable')
         dev_raw = results[1] if creator and isinstance(results[1], int) else None
         holders = holder_stats(rows, {vault}, supply, dev_raw)
@@ -848,6 +866,9 @@ class Solter:
                     del cache[key]
             if len(self.reasons) > 5000:
                 self.reasons.clear()
+            if len(self.flow_qualified) > 10000:
+                self.flow_qualified.clear()
+                self.quality_qualified.clear()
             if now - last_log >= 300:
                 last_log = now
                 after, s = self.db.metrics(), self.db.stats()

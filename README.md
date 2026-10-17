@@ -1,4 +1,4 @@
-# Solter v2.2.1: scanner scalping momentum Solana (sumber publik/gratis)
+# Solter v2.2.2: scanner scalping momentum Solana (sumber publik/gratis)
 
 Solter menggabungkan **launch baru, migrasi, dan token PumpSwap yang sudah lama tetapi
 mulai ramai lagi**. Kandidat diurutkan berdasarkan momentum dan dipantau menggunakan log
@@ -15,6 +15,30 @@ pemeriksaan kontrak. Setiap call dilacak
 - **Tidak bisa menjamin semua token tertangkap atau profit.** API publik memerlukan waktu indeks,
   koneksi putus bisa menghilangkan event, dan volume bisa direkayasa. Baca [docs/ANALISIS.md](docs/ANALISIS.md) untuk alasan setiap
   filter dan batasannya.
+
+## Perbaikan v2.2.2: kandidat tertahan saat RPC holder gagal
+
+Berdasarkan `stats` Termux, bot masih membaca transaksi (`trade_from_logs`)
+namun dapat mencatat `no_call:holders unavailable`. Data yang gagal
+terbaca **bukan bukti token aman maupun berbahaya**. Sebelumnya hasil gagal
+tersebut disimpan hingga 120 detik: terlalu lama untuk window scalping 3 menit.
+
+- Holder RPC tidak tersedia: ulang cek setelah 20 detik (bukan 120 detik),
+  dengan cache agar evaluasi per detik tidak membanjiri RPC.
+- Sinyal **tetap dilarang terkirim** sampai pemeriksaan holder benar-benar
+  berhasil dan lolos aturan keamanan. Tidak ada pelonggaran anti-rug.
+- Tambahan penghitung untuk mendiagnosis funnel: `flow_confirmed`
+  (momentum on-chain pertama kali lolos), `holders_rpc_unavailable`, dan
+  `quality_confirmed` (semua syarat termasuk skor minimum sudah lolos).
+- Jika `calls` kosong, cari dulu apakah `flow_confirmed` tumbuh, apakah
+  `holders_rpc_unavailable` bertambah, dan apakah `quality_confirmed` naik.
+  Metrik `stats` bersifat kumulatif lintas restart; bandingkan dua snapshot
+  lima menit terpisah untuk menilai kondisi saat ini.
+
+**Periksa `.env` lama dengan `python bot.py doctor`.** `CALL_MODE=ketat`,
+`MAX_ACTIVE_TOKENS`, `MIN_NET_SOL`, dan `MIN_SCORE` yang ditulis eksplisit
+akan mengesampingkan preset dari kode baru. Adanya 8 token sedang `watching`
+**tidak membuktikan** `MAX_ACTIVE_TOKENS=8`; lihat konfigurasi sebenarnya.
 
 ## Perbaikan v2.2.1: RPC -32020
 

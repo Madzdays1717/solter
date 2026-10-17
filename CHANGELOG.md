@@ -1,3 +1,12 @@
+## v2.2.2 — holder RPC transient retry + call funnel (2026-10-18)
+
+- Recheck `holders unavailable` after 20s rather than caching the transient
+  RPC failure for 120s; preserves safety: no holder data still means no call.
+- New counters `flow_confirmed`, `holders_rpc_unavailable`, `quality_confirmed`
+  help distinguish lack of momentum, unavailable RPC data, and blocked deep checks.
+- Added regression test for unavailable→available holder RPC within one momentum
+  window. No claim of live-mainnet success or profitable performance.
+
 ## v2.2.1 — Agave RPC cursor fix (2026-10-18)
 
 - **Fix RPC `getSignaturesForAddress -32020`**: stop using the saved last trade
