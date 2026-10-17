@@ -1,103 +1,145 @@
-# Solter v1.0.0 — Early Flow Intelligence
+# Solter v2: caller memecoin awal, 100% sumber gratis
 
-**A fresh implementation, not an incremental patch to v0.4.x.** Solter continuously discovers newly launched Pump.fun tokens, watches a **bounded** selection via Solana WebSocket, parses actual Solana transactions, and sends a Telegram *early-flow research call* only with recent verified buy activity and sufficient market data. There is **no automatic trading**, private key management, paid feed, or guaranteed return.
+Solter memantau setiap token baru Pump.fun, memilih yang uang masuknya paling cepat, membaca
+trade-nya langsung dari log Solana, lalu mengirim **satu** call Telegram hanya jika aliran beli
+nyata (dalam SOL), distribusi holder, dev, creator, dan kontraknya lolos. Setiap call dilacak
+60 menit (2x/3x/5x/10x, dev jual) supaya kualitas filter bisa dibuktikan dan disetel.
 
-## Installation (Termux)
+- **Gratis**: PumpPortal (launch & migrasi), RPC Solana publik/free tier, DexScreener, metadata IPFS.
+  Tanpa langganan, tanpa API key wajib.
+- **Tidak ada trading otomatis** dan tidak ada private key.
+- **Bukan jaminan profit.** Baca [docs/ANALISIS.md](docs/ANALISIS.md) untuk alasan setiap
+  filter dan batasannya.
 
-1. Keep the old Solter process **stopped** so it cannot also send Telegram calls.
-2. Install Python and a session manager:
+## Apa yang baru di v2
+
+| | v1 | v2 |
+|---|---|---|
+| Pilih token | 5 slot siapa datang duluan | Reservoir semua launch, slot untuk inflow SOL tercepat, kesempatan kedua |
+| Data trade | `getTransaction` per trade (budget habis) | Dibaca dari log WebSocket: 0 request per trade |
+| Sinyal | Hitungan transaksi | SOL bersih, pembeli non-debu, porsi wallet, bundle, tekanan jual |
+| Harga | Wajib DexScreener (telat) | On-chain dari reserve bonding curve |
+| Anti-rug | Mint authority, dev jual | + top-10 holder, holder terbesar, saldo dev, buy awal dev, serial creator, sosial |
+| Hasil | Tidak diukur | 5/15/30/60 mnt, puncak, drawdown, laporan per grade, token terlewat |
+| Migrasi | Tunggu DexScreener | Alamat pool PumpSwap diturunkan sendiri |
+
+## Instalasi (Termux)
+
+1. Hentikan Solter lama supaya tidak ada dua bot yang mengirim call.
+2. Pasang Python dan tmux:
 
    ```bash
-   pkg update && pkg install python tmux unzip -y
-   termux-setup-storage
+   pkg update && pkg install python tmux git -y
    ```
-3. Extract the Solter v1 ZIP in a **separate folder**, for example:
+3. Ambil kode dan pasang dependensi:
 
    ```bash
-   mkdir -p ~/solter-v1
-   unzip ~/storage/downloads/solter-v1.0.0.zip -d ~/solter-v1
-   cd ~/solter-v1
+   git clone https://github.com/madzdays1717/solter.git ~/solter-v2
+   cd ~/solter-v2
    python -m pip install -r requirements.txt
    cp .env.example .env
-   nano .env
+   nano .env        # isi TELEGRAM_BOT_TOKEN dan TELEGRAM_CHAT_ID
    ```
 
-   Add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID`. Never publish `.env` or copy it from the repo. If an existing working `.env` is already available, transfer it privately and add the new options; do not put it in a public ZIP.
-
-4. Check offline tests and Telegram:
+   Jangan pernah membagikan `.env`. Kalau memakai `.env` dari v1, salin hanya token Telegram
+   dan URL RPC; nilai lain sebaiknya dari `.env.example` yang baru (v1 memakai batas RPC yang
+   jauh lebih kecil).
+4. Cek:
 
    ```bash
-   python -m unittest discover -s tests -v
-   python bot.py doctor
-   python bot.py test
+   python -m unittest discover -s tests
+   python bot.py doctor     # konfigurasi, tanpa menampilkan rahasia
+   python bot.py test       # pesan uji ke Telegram
+   python bot.py probe      # cek live: event trade di log, pool PumpSwap, harga SOL, PumpPortal
    ```
-5. Run in a persistent terminal session:
+
+   Hasil `probe` yang sehat: `pump_trade_events.from_logs` > 0, `pumpswap_pools.canonical_match`
+   sama dengan `checked`, `sol_usd_dexscreener` berisi angka, `pumpportal_launch` berisi token.
+5. Jalankan di sesi yang tetap hidup:
 
    ```bash
    termux-wake-lock
    tmux new -s solter
-   cd ~/solter-v1 && python bot.py run
+   cd ~/solter-v2 && python bot.py run
    ```
 
-   Detach `Ctrl+B`, then `D`; reattach with `tmux attach -t solter`. In another session: `cd ~/solter-v1 && python bot.py stats`. To stop the service, return to session and use `Ctrl+C`. Prevent Android from battery-optimizing Termux, and avoid killing it. **A wake lock and tmux cannot guarantee 24/7 operation**: the operating system can kill background processes, and Wi-Fi/network access can fail. An always-on VPS is more dependable for 24/7 uptime.
+   Keluar dari tmux: `Ctrl+B` lalu `D`. Masuk lagi: `tmux attach -t solter`. Berhenti: `Ctrl+C`.
+   Android tetap bisa mematikan proses di latar belakang; VPS lebih andal untuk 24/7.
 
-### Optional: restart after phone reboot
+Opsional: autostart setelah HP restart dengan Termux:Boot: `bash setup-autostart.sh`
+(sesi tmux `solter-v2`). Jangan jalankan sesi manual dan sesi boot bersamaan.
 
-Install the **Termux:Boot** companion app from a compatible source, open it once, and run `bash setup-autostart.sh` inside `~/solter-v1`. This installs a best-effort boot script into `~/.termux/boot/start-solter-v1`. It uses a separate `tmux` session called `solter-v1`; connect with `tmux attach -t solter-v1`. Termux:Boot must be allowed to run in the background and Android may still kill the process. To disable autostart, remove the generated boot script. **Do not run the normal and boot sessions simultaneously**; stop the manual `tmux` session before relying on the boot script.
+Data v2 ada di `data/solter-v2.sqlite3` dan tidak menyentuh database v1.
 
-## RPC config (free, usage bounded)
-
-The default Solana public RPC HTTP/WSS URLs allow development but are subject to strict throttling and may not support stable WebSocket operations. For a more reliable **free tier**, bring your own provider endpoint and its corresponding WS endpoint (e.g. Helius Free if its current terms suit you):
-
-```env
-SOLANA_RPC_URL=https://YOUR-OWN-HTTPS-RPC-ENDPOINT
-SOLANA_RPC_WS_URL=wss://YOUR-OWN-WSS-RPC-ENDPOINT
-RPC_REQUESTS_PER_MIN=30
-RPC_REQUESTS_PER_DAY=1800
-MAX_ACTIVE_TOKENS=5
-WATCH_SECONDS=240
-```
-
-The caps are **request counts**, not provider credit accounting. Some RPC methods may cost multiple provider credits. **You must check your provider's actual credit cost and reduce `RPC_REQUESTS_PER_DAY` accordingly**. No software can guarantee a provider's free tier or uptime forever. When the local quota is exhausted, deep analysis pauses; free PumpPortal discovery and bot process remain active. The counter resets at UTC midnight. No automatic paid tier activation occurs.
-
-**Do not confuse `solter` (old folder) with `solter-v1` (new folder)**. v1 data lives in `solter-v1/data/solter.sqlite3` and does not overwrite the old database.
-
-## What it actually does
-
-1. One PumpPortal WebSocket subscribes to free `subscribeNewToken` and `subscribeMigration` streams. It never sends `subscribeTokenTrade` or `subscribeAccountTrade` (metered features).
-2. A bounded number of recent tokens enter the watchlist. Non-admitted launches are counted, not represented as fully analyzed. Each active candidate receives a Pump bonding-curve PDA (before graduation), or a PumpSwap pair address (after migration).
-3. One shared Solana `logsSubscribe` WSS session listens for signatures mentioning watched accounts. HTTP `getSignaturesForAddress` catches up at startup/after interruptions. `getTransaction` parses a conservative **single-signer net token balance change** and stores one buy or sell event per signature, excluding ambiguous transactions.
-4. The signal checks recent activity, at least five **distinct wallet addresses**, buy bursts, continued recent buying, no extreme concentration of *buy count* from one wallet, and limits on sell transactions. It is not proof of independent beneficial ownership or wash-trade detection.
-5. DexScreener supplies the currently indexed USD token price. A baseline price observed before the call is used to reject a severely overextended move. If price/pair is unavailable, **no call** is sent rather than inventing USD value.
-6. For bonding-curve tokens, Solter validates the on-chain mint authorities and bonding curve, excludes confirmed Mayhem, and blocks when a verified creator sells in the observed transaction window. This does not constitute a full rug-pull/security audit.
-7. One Telegram message per mint across New and Migrated; photo+caption when Telegram accepts the image URL, otherwise text only. Telegram delivery timeouts are marked **uncertain** and deliberately **not retried** to avoid duplicate messages (manual inspection needed).
-8. SQLite persists token/watch state, signatures, calls and daily RPC request count; worker supervisor, reconnect and backoff help recover from ordinary network errors.
-
-## Known limits — read before trusting calls
-
-- **Not exhaustive.** With the default five slots and four-minute watch window, Solter cannot deeply analyze all high-volume launches. The admission policy is simple first available slot, **not** a validated best-token ranking. It can miss the strongest token.
-- **Price may index late.** DexScreener can lack a pair in the earliest minutes. Solter requires a usable current USD price, so it can miss the earliest entry, especially before migration.
-- **Transaction inference is conservative and incomplete.** Complex versioned/multisigner swaps and balance metadata with missing wallet owners are ignored; token deltas are **not** exact SOL/USD buy amounts. The RPC subscription `mentions` is one pubkey per call, and you cannot track arbitrary thousands of mints for free.
-- **Wallet analysis is limited.** Distinct addresses are not necessarily distinct people. There is no verified funding-graph clustering, insider labeling, bought-vs-sold notional analysis, volume manipulation certification, smart-wallet PnL, or universal rug-pull detection. Security unknown remains unknown.
-- **After migration**, a new PumpSwap pool and new stream may be indexed later; Solter follows stage internally, but tokens that have expired can be missed or analyzed after the optimum entry.
-- **Operational continuity ≠ signal continuity.** The process attempts to keep running, but if a provider fails or the quota exhausts, no reliable trading signal is possible. Track budget, errors and data freshness via `stats` and console logs.
-- **No live production validation was performed by this package build.** Offline tests validate parsers, storage, duplicate prevention and message behavior; run paper tracking for 24–72 hours before considering any money at risk.
-
-## Command reference
+## Perintah
 
 ```bash
-python bot.py run        # Persistent watcher
-python bot.py stats      # Saved discovery, trade, call and quota counts
-python bot.py doctor     # Configuration diagnostic; never prints secrets
-python bot.py test       # Sends one Telegram connectivity test
-python -m unittest discover -s tests -v
+python bot.py run         # bot
+python bot.py report      # hasil call 7 hari (--days 30 untuk 30 hari)
+python bot.py stats       # jumlah token per status, call, metrik, RPC hari ini
+python bot.py doctor      # konfigurasi
+python bot.py test        # uji Telegram
+python bot.py probe       # uji asumsi live di koneksi Anda (~15 request RPC)
 ```
 
-## Sources
+## Contoh call
 
+```
+⚡ SOLTER CALL · Grade A · 82/100
+Nama Koin ($SYM)
+
+🧪 Bonding curve 34% · umur 6 mnt
+💰 MC $12.3K (82 SOL) · harga $0.00001234
+📈 Net inflow +6.4 SOL /3 mnt · harga +38%
+👥 14 pembeli · 6 aktif 45 dtk · burst 5/20 dtk
+🐳 Top10 18.5% · terbesar 4.1% · dev 2.0%
+👨‍💻 Dev: launch ke-1 · beli awal 3.2% · belum terlihat jual
+🔗 X · Telegram · Web
+🛡️ Mint & freeze authority dicabut
+```
+
+Balasan otomatis di bawah call: `🚀 SYM 2.1x sejak call` (2x, 3x, 5x, 10x) dan peringatan jika
+dev menjual setelah call (`FOLLOWUP_ALERTS=false` untuk mematikan).
+
+## RPC gratis dan budget
+
+Default memakai RPC publik `api.mainnet-beta.solana.com` (gratis, tanpa daftar). Untuk koneksi
+yang lebih stabil, pakai endpoint free tier milik Anda sendiri (HTTPS + WSS) di `.env`.
+
+Solter menjaga batasnya sendiri: `RPC_REQUESTS_PER_MIN` (default 60) dan
+`RPC_REQUESTS_PER_DAY` (default 15.000, reset 00:00 UTC). Pembagian per hari:
+
+- sweep reservoir: maksimal 60% (interval otomatis melambat jika budget kecil)
+- backfill trade: sampai 75%
+- fallback transaksi: sampai 85%
+- cek mendalam sebelum call dan pelacakan: sisanya
+
+Trade live **tidak** memakai budget karena dibaca dari log WebSocket. Jika provider Anda punya
+kuota kredit, sesuaikan `RPC_REQUESTS_PER_DAY` dengan biaya kredit per metode di provider itu.
+
+## Menyetel filter
+
+Semua ambang ada di `.env.example` dengan penjelasan. Cara yang disarankan:
+
+1. Jalankan 24-72 jam dengan default.
+2. `python bot.py report`: lihat hit rate per grade dan bagian *"Token yang naik ≥3x ... tanpa call"*.
+3. Ubah satu ambang yang paling sering membuang runner, ulangi.
+
+## Batasan
+
+- Laporan belum memasukkan fee dan slippage.
+- Token yang naik-turun dalam hitungan detik di antara dua sweep bisa terlewat.
+- Pembeli unik ≠ orang berbeda; kluster pendanaan wallet tidak dianalisis.
+- RPC publik bisa throttle atau memutus WebSocket; status terlihat di log `STATUS` tiap 5 menit.
+- Jalankan `probe` lagi bila Pump.fun memperbarui programnya.
+
+Dokumentasi teknis: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Sumber
+
+- [Pump public docs & IDL](https://github.com/pump-fun/pump-public-docs) (pump.json, pump_amm.json)
 - [PumpPortal Data API](https://pumpportal.fun/data-api/real-time/)
-- [Pump.fun official IDL](https://github.com/pump-fun/pump-public-docs/blob/main/idl/pump.json)
-- [Solana logsSubscribe](https://solana.com/docs/rpc/websocket/logssubscribe)
-- [Solana getTransaction](https://solana.com/docs/rpc/http/gettransaction)
-- [Solana getSignaturesForAddress](https://solana.com/docs/rpc/http/getsignaturesforaddress)
+- [Solana RPC: logsSubscribe](https://solana.com/docs/rpc/websocket/logssubscribe),
+  [getMultipleAccounts](https://solana.com/docs/rpc/http/getmultipleaccounts),
+  [getTokenLargestAccounts](https://solana.com/docs/rpc/http/gettokenlargestaccounts)
 - [DexScreener API](https://docs.dexscreener.com/api/reference)

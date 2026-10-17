@@ -1,78 +1,120 @@
-"""Only classify verified net SPL token changes of a signer, never raw log counts.
+"""Live buy flow measured in SOL: the evidence a call needs.
 
-This is NOT a reliable notional size in SOL/USD, funding-link detector, or
-proof of organically independent wallets. One ambiguous tx == no trade.
+Counting transactions is easy to fake (volume bots, dust buys, one wallet
+split into many). Every gate here is measured in SOL from decoded trade
+events, after dust is removed, and the creator's own trades never count
+as demand. None of this predicts returns; it filters for real, current,
+spread-out buying.
 """
 from __future__ import annotations
-import time
-from collections import defaultdict,Counter
+
+from collections import Counter, defaultdict
 from dataclasses import dataclass
-from .chain import PUMP_PROGRAM
+
+from .events import Trade
+
 
 @dataclass(frozen=True)
-class Trade:
-    wallet:str
-    side:str
-    amount:float
-    at:float
+class Rules:
+    window: int = 180             # seconds of flow judged
+    min_buys: int = 8             # non-dust buys
+    min_buyers: int = 6           # distinct non-dust buyers (not the creator)
+    min_net_sol: float = 2.0      # buy SOL minus sell SOL in the window
+    dust_sol: float = 0.05        # buys smaller than this are ignored
+    max_wallet_share: float = .30  # largest buyer's share of buy SOL
+    max_bundle_share: float = .50  # buy SOL in slots where 3+ wallets bought together
+    max_sell_ratio: float = .60   # sell SOL / buy SOL
+    max_lag: float = 30           # newest buy must be this fresh (seconds)
+    max_run: float = 1.0          # price rise across the window (1.0 = +100%)
+    min_span: float = 20          # seconds between first and last buy
+    recent: float = 45            # seconds that count as "now"
 
-def _amount(entry:dict)->int:
-    try:return int(entry['uiTokenAmount']['amount'])
-    except (ValueError,KeyError,TypeError):return 0
-
-def parse_trade(tx:dict|None,mint:str,curve:str,program:str=PUMP_PROGRAM)->Trade|None:
-    if not isinstance(tx,dict):return None
-    meta=tx.get('meta') or {}
-    if meta.get('err') is not None:return None
-    logs=meta.get('logMessages') or []
-    if not any(f'Program {program} invoke' in str(x) for x in logs):return None
-    message=((tx.get('transaction') or {}).get('message') or {})
-    keys=message.get('accountKeys') or []
-    signers={k.get('pubkey') for k in keys if isinstance(k,dict) and k.get('signer') is True}
-    if not signers:return None
-    def owners(rows):
-        result=defaultdict(int)
-        for r in rows or []:
-            if r.get('mint')!=mint:continue
-            owner=r.get('owner')
-            if not owner:continue
-            result[owner]+=_amount(r)
-        return result
-    before=owners(meta.get('preTokenBalances'));after=owners(meta.get('postTokenBalances'))
-    if not before and not after:return None
-    deltas={w:after.get(w,0)-before.get(w,0) for w in set(before)|set(after)}
-    matched=[(w,d) for w,d in deltas.items() if w in signers and w!=curve and d!=0]
-    # Multisigner and multi-trade transactions require more sophisticated decoding.
-    if len(matched)!=1:return None
-    w,delta=matched[0]
-    at=tx.get('blockTime')
-    if not isinstance(at,(int,float)) or at<=0 or abs(time.time()-at)>600:return None
-    return Trade(w,'buy' if delta>0 else 'sell',abs(delta),float(at))
 
 @dataclass(frozen=True)
-class Signal:
-    ok:bool
-    reason:str
-    buys:int=0
-    sells:int=0
-    buyers:int=0
-    recent_buyers:int=0
-    burst:int=0
+class Flow:
+    ok: bool
+    reason: str
+    buys: int = 0
+    sells: int = 0
+    buyers: int = 0
+    recent_buyers: int = 0
+    burst: int = 0
+    buy_sol: float = 0.0
+    sell_sol: float = 0.0
+    top_share: float = 0.0
+    bundle_share: float = 0.0
+    run: float | None = None
+    creator_sold: bool = False
 
-def evaluate(trades:list[tuple],now:float|None=None,min_buys:int=6,min_unique:int=5)->Signal:
-    now=now or time.time()
-    valid=[(at,w,side) for at,w,side,_ in trades if 0<=now-at<=150 and side in ('buy','sell')]
-    buys=[(at,w) for at,w,side in valid if side=='buy']
-    sells=[(at,w) for at,w,side in valid if side=='sell']
-    unique={w for _,w in buys}
-    recent={(w) for at,w in buys if now-at<=45}
-    burst=max((sum(1 for tb,_ in buys if 0<=tb-at<=20) for at,_ in buys),default=0)
-    if len(buys)<min_buys:return Signal(False,'insufficient buys',len(buys),len(sells),len(unique),len(recent),burst)
-    if len(unique)<min_unique:return Signal(False,'insufficient independent addresses observed',len(buys),len(sells),len(unique),len(recent),burst)
-    if len(recent)<3 or burst<3:return Signal(False,'buy momentum not current',len(buys),len(sells),len(unique),len(recent),burst)
-    if len(buys)<len(sells)*1.8:return Signal(False,'sell transactions dominate',len(buys),len(sells),len(unique),len(recent),burst)
-    counts=Counter(w for _,w in buys)
-    if max(counts.values())/len(buys)>.35:return Signal(False,'one wallet dominates buy count',len(buys),len(sells),len(unique),len(recent),burst)
-    if max(at for at,_ in buys)-min(at for at,_ in buys)<15:
-        return Signal(False,'insufficient observation window',len(buys),len(sells),len(unique),len(recent),burst)
-    return Signal(True,'confirmed sequential buy activity',len(buys),len(sells),len(unique),len(recent),burst)
+    @property
+    def net_sol(self) -> float:
+        return self.buy_sol - self.sell_sol
+
+    @property
+    def sell_ratio(self) -> float:
+        return self.sell_sol / self.buy_sol if self.buy_sol else 0.0
+
+
+def evaluate(trades: list[Trade], now: float, rules: Rules = Rules(),
+             creator: str | None = None) -> Flow:
+    """Judge the most recent `rules.window` seconds of `trades` (all trades seen while watching)."""
+    creator_sold = bool(creator) and any(t.side == 'sell' and t.wallet == creator for t in trades)
+    window = sorted((t for t in trades if -5 <= now - t.at <= rules.window),
+                    key=lambda t: (t.at, t.slot or 0, t.idx))
+    unknown = sum(1 for t in window if t.sol is None)
+    buys = [t for t in window if t.side == 'buy' and (t.sol or 0) >= rules.dust_sol
+            and t.wallet != creator]
+    sells = [t for t in window if t.side == 'sell']
+    buy_sol = sum(t.sol for t in buys)
+    sell_sol = sum(t.sol or 0 for t in sells)
+    buyers = {t.wallet for t in buys}
+    recent = {t.wallet for t in buys if now - t.at <= rules.recent}
+    burst = max((sum(1 for u in buys if 0 <= u.at - t.at <= 20) for t in buys), default=0)
+    per_wallet = Counter()
+    for t in buys:
+        per_wallet[t.wallet] += t.sol
+    top_share = max(per_wallet.values()) / buy_sol if buy_sol else 0.0
+    by_slot = defaultdict(list)
+    for t in buys:
+        if t.slot is not None:
+            by_slot[t.slot].append(t)
+    bundled = sum(sum(t.sol for t in group) for group in by_slot.values()
+                  if len({t.wallet for t in group}) >= 3)
+    bundle_share = bundled / buy_sol if buy_sol else 0.0
+    prices = [t.price for t in window if t.price]
+    run = prices[-1] / prices[0] - 1 if len(prices) >= 2 else None
+
+    flow = dict(buys=len(buys), sells=len(sells), buyers=len(buyers), recent_buyers=len(recent),
+                burst=burst, buy_sol=buy_sol, sell_sol=sell_sol, top_share=top_share,
+                bundle_share=bundle_share, run=run, creator_sold=creator_sold)
+
+    def verdict(reason: str, ok: bool = False) -> Flow:
+        return Flow(ok, reason, **flow)
+
+    if creator_sold:
+        return verdict('creator sold')
+    if window and unknown > len(window) * .2:
+        return verdict('trade sizes unknown')
+    if len(buys) < rules.min_buys:
+        return verdict('few buys')
+    if len(buyers) < rules.min_buyers:
+        return verdict('few buyers')
+    if buy_sol - sell_sol < rules.min_net_sol:
+        return verdict('weak net inflow')
+    if len(recent) < 3 or burst < 3:
+        return verdict('momentum faded')
+    if now - buys[-1].at > rules.max_lag:
+        return verdict('stale flow')
+    if sell_sol > buy_sol * rules.max_sell_ratio:
+        return verdict('sell pressure')
+    if top_share > rules.max_wallet_share:
+        return verdict('one wallet dominates')
+    if bundle_share > rules.max_bundle_share:
+        return verdict('bundled buys')
+    if buys[-1].at - buys[0].at < rules.min_span:
+        return verdict('too short')
+    if run is not None and run > rules.max_run:
+        return verdict('overextended')
+    if run is not None and run < -.30:
+        return verdict('falling')
+    return verdict('flow confirmed', True)

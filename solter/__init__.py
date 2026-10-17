@@ -1,1 +1,2 @@
-"""Solter v1.0.0 — free-budget Solana early-opportunity watcher."""
+"""Solter: a free early-flow memecoin caller for Pump.fun tokens on Solana."""
+__version__ = '2.0.0'

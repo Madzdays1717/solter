@@ -1,56 +1,114 @@
 import tempfile
+import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+
+from helpers import CREATOR, MINT, addr
+from solter.events import Trade
 from solter.storage import Store
 
-M='SguaCwgH7g45ZCc7SB19NadCc2XjsPDo12DMjvfpump'
 
 class StorageTests(unittest.TestCase):
     def setUp(self):
-        self.tmp=tempfile.TemporaryDirectory();self.db=Store(Path(self.tmp.name)/'s.sqlite3')
-        self.event={'symbol':'AAA','name':'Coin'}
-    def tearDown(self):self.db.db.close();self.tmp.cleanup()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.db = Store(Path(self.tmp.name) / 's.sqlite3')
+        self.now = time.time()
+
+    def tearDown(self):
+        self.db.close()
+        self.tmp.cleanup()
+
+    def add(self, mint=MINT, creator=CREATOR, ago=100):
+        return self.db.discover({'mint': mint, 'symbol': 'AAA', 'name': 'Coin', 'creator': creator,
+                                 'dev_sol': 1, 'dev_tokens': 3e7}, addr('curve-' + mint), self.now - ago)
+
+    def test_discovery_counts_creator_launches(self):
+        self.assertTrue(self.add())
+        self.assertFalse(self.add())                        # same mint twice
+        self.add(mint=addr('m2'))
+        self.assertEqual(self.db.launches(CREATOR), 2)
+        self.assertEqual(self.db.launches(None), 0)
+
+    def test_sweep_batch_prefers_alive_then_newest(self):
+        self.add(mint=addr('old'), ago=300)
+        self.add(mint=addr('new'), ago=60)
+        self.add(mint=addr('baby'), ago=5)                  # too young for a first look
+        self.add(mint=addr('hot'), ago=400)
+        self.db.update(addr('hot'), state='alive', traction=5, checks=1)
+        batch = [t['mint'] for t in self.db.sweep_batch(self.now, 10, 45, 90)]
+        self.assertEqual(batch, [addr('hot'), addr('new'), addr('old')])
+
+    def test_watch_cycle(self):
+        self.add()
+        self.assertFalse(self.db.promote(MINT, self.now, 300))   # only alive tokens
+        self.db.update(MINT, state='alive')
+        self.assertTrue(self.db.promote(MINT, self.now, 300))
+        self.assertEqual([t['mint'] for t in self.db.subscriptions()], [MINT])
+        trade = Trade(addr('b'), 'buy', 10, .5, self.now - 3, 2e-8, .2, 7, 0)
+        self.assertEqual(self.db.add_trades(MINT, 'sig', [trade]), 1)
+        self.assertEqual(self.db.add_trades(MINT, 'sig', [trade]), 0)
+        token = self.db.token(MINT)
+        self.assertEqual((token['first_price'], token['last_sig']), (2e-8, 'sig'))
+        self.assertAlmostEqual(token['progress'], 20)
+        self.assertEqual(self.db.trades(MINT)[0].sol, .5)
+        self.db.demote(MINT, self.now, 300, 'quiet')
+        token = self.db.token(MINT)
+        self.assertEqual((token['state'], token['reason']), ('alive', 'quiet'))
+        self.assertEqual(self.db.add_trades(MINT, 'sig2', [trade]), 0)   # not watched any more
+
+    def test_migration(self):
+        self.add()
+        self.db.update(MINT, state='watching')
+        self.db.add_trades(MINT, 's', [Trade('w', 'buy', 1, 1, self.now)])
+        self.assertEqual(self.db.migrate(MINT, 'pool', self.now), 'watching')
+        token = self.db.token(MINT)
+        self.assertEqual((token['stage'], token['account'], token['state']), ('migrated', 'pool', 'watching'))
+        self.assertEqual(self.db.trades(MINT), [])
+        self.assertEqual(self.db.migrate(MINT, 'pool', self.now), 'repeat')
+        self.assertEqual(self.db.migrate(addr('stranger'), 'pool2', self.now), 'unknown')
+        self.assertEqual(self.db.token(addr('stranger'))['state'], 'alive')
+        self.add(mint=addr('called'))
+        self.db.claim_call(addr('called'), 'new', 5, self.now)
+        self.db.update(addr('called'), state='expired')
+        self.db.migrate(addr('called'), 'pool3', self.now)
+        self.assertEqual(self.db.token(addr('called'))['state'], 'expired')   # never revived
+
+    def test_one_call_per_mint_and_hourly_cap(self):
+        self.assertTrue(self.db.claim_call(MINT, 'new', 2, self.now))
+        self.assertFalse(self.db.claim_call(MINT, 'migrated', 2, self.now))
+        self.assertTrue(self.db.claim_call(addr('b'), 'new', 2, self.now))
+        self.assertFalse(self.db.claim_call(addr('c'), 'new', 2, self.now))
+        self.db.finish_call(MINT, 'sent', 42, {'score': 80, 'grade': 'A', 'bogus': 1})
+        call = self.db.call(MINT)
+        self.assertEqual((call['state'], call['message_id'], call['score']), ('sent', 42, 80))
+
+    def test_outcome_tracks_peak_and_low_after_the_call_only(self):
+        self.db.claim_call(MINT, 'new', 5, self.now)
+        self.db.open_outcome(MINT, 1e-8, self.now)
+        self.db.track(MINT, 9e-8, self.now - 10)              # before the call: ignored
+        self.db.track(MINT, 3e-8, self.now + 60)
+        self.db.track(MINT, .5e-8, self.now + 120)
+        self.db.track(MINT, 2e-8, self.now + 90)              # late arrival: peak/low only
+        o = self.db.outcome(MINT)
+        self.assertEqual((o['peak'], o['low'], o['last']), (3e-8, .5e-8, .5e-8))
+
+    def test_expiry_and_missed_runners(self):
+        self.add(mint=addr('stale'), ago=7200)
+        self.add(mint=addr('unchecked'), ago=700)
+        self.add(mint=addr('runner'), ago=600)
+        self.db.update(addr('runner'), checks=2, state='alive', first_mcap_sol=40, peak_mcap_sol=200,
+                       reason='few buyers')
+        self.assertEqual(self.db.expire(self.now, 60), 2)
+        self.assertEqual(self.db.token(addr('unchecked'))['reason'], 'not checked in time')
+        missed = self.db.missed(self.now - 86400, 3)
+        self.assertEqual([m['mint'] for m in missed], [addr('runner')])
 
     def test_budget(self):
         self.assertTrue(self.db.budget_claim(2))
         self.assertTrue(self.db.budget_claim(2))
         self.assertFalse(self.db.budget_claim(2))
-        self.assertEqual(self.db.budget_used(),2)
+        self.assertEqual(self.db.budget_used(), 2)
 
-    def test_only_one_call(self):
-        self.assertTrue(self.db.claim_call(M,'new',4))
-        self.assertFalse(self.db.claim_call(M,'migrated',4))
-        self.db.finish_call(M,'sent')
-        self.assertTrue(self.db.has_call(M))
 
-    def test_migration_changes_watch_account_and_clears_old_flow(self):
-        self.assertTrue(self.db.admit(M,self.event,3,240))
-        self.db.set_curve(M,'old_bonding_curve')
-        self.db.set_market(M,.001,None)
-        self.db.record_trade(M,'tx1','wallet','buy',100,__import__('time').time())
-        self.db.migrate(M)
-        now=self.db.watching()[0]
-        self.assertEqual(now['stage'],'migrated')
-        self.assertEqual(now['curve'],'')
-        self.assertIsNone(now['first_price'])
-        self.assertEqual(self.db.trades(M),[])
-        self.db.record_trade(M,'tx2','wallet','buy',100,__import__('time').time())
-        self.db.migrate(M)
-        self.assertEqual(len(self.db.trades(M)),1)
-
-    def test_token_lifecycle(self):
-        self.assertTrue(self.db.admit(M,self.event,1,240))
-        self.assertFalse(self.db.admit(M,self.event,1,240))
-        self.assertEqual(self.db.watching()[0]['stage'],'new')
-        self.db.migrate(M)
-        self.assertEqual(self.db.watching()[0]['stage'],'migrated')
-        self.assertTrue(self.db.record_trade(M,'sig','wallet','buy',123,100))
-        self.assertFalse(self.db.record_trade(M,'sig','wallet','buy',123,100))
-        self.db.mark_processed(M,'sig')
-        self.assertTrue(self.db.seen_trade(M,'sig'))
-        self.db.db.execute("UPDATE tokens SET state='expired' WHERE mint=?",(M,));self.db.db.commit()
-        self.assertTrue(self.db.admit(M,self.event,1,240))
-        self.assertEqual(self.db.trades(M,10**10),[])
-
-if __name__=='__main__':unittest.main()
+if __name__ == '__main__':
+    unittest.main()
