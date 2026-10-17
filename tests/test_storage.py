@@ -103,11 +103,13 @@ class StorageTests(unittest.TestCase):
         missed = self.db.missed(self.now - 86400, 3)
         self.assertEqual([m['mint'] for m in missed], [addr('runner')])
 
-    def test_budget(self):
-        self.assertTrue(self.db.budget_claim(2))
-        self.assertTrue(self.db.budget_claim(2))
-        self.assertFalse(self.db.budget_claim(2))
-        self.assertEqual(self.db.budget_used(), 2)
+    def test_budget_counts_per_kind(self):
+        self.db.budget_claim('sweep')
+        self.db.budget_claim('sweep')
+        self.db.budget_claim('decision')
+        self.assertEqual(self.db.budget_by_kind(), {'sweep': 2, 'decision': 1})
+        self.assertEqual(self.db.budget_used(), 3)
+        self.assertEqual(self.db.stats()['rpc_today_by_kind'], {'sweep': 2, 'decision': 1})
 
 
 if __name__ == '__main__':

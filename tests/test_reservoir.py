@@ -16,7 +16,7 @@ def curve(real_sol, **kw):
 
 def token(**kw):
     base = {'mint': MINT, 'state': 'fresh', 'stage': 'new', 'created_at': NOW - 120, 'dev_sol': 1.0,
-            'checks': 0, 'checked_at': None, 'real_sol': None, 'creator': CREATOR, 'dev_tokens': 30e6,
+            'checks': 0, 'checked_at': NOW - 30, 'real_sol': None, 'creator': CREATOR, 'dev_tokens': 30e6,
             'promotions': 0, 'cooldown_until': 0, 'progress': 10, 'traction': 0}
     base.update(kw)
     return base
@@ -24,13 +24,13 @@ def token(**kw):
 
 class ReservoirTests(unittest.TestCase):
     def test_first_check_rates_inflow_since_launch(self):
-        up = classify(token(), curve(5), NOW, RULES)
+        up = classify(token(checked_at=None), curve(5), NOW, RULES)
         self.assertEqual(up['state'], 'alive')
         self.assertAlmostEqual(up['traction'], 4 / 2)       # 4 SOL from others over two minutes
         self.assertEqual(up['first_mcap_sol'], up['mcap_sol'])
 
     def test_quiet_token_gets_one_more_look_then_dies(self):
-        up = classify(token(), curve(1.1), NOW, RULES)
+        up = classify(token(checked_at=None), curve(1.1), NOW, RULES)
         self.assertEqual(up['state'], 'fresh')
         t = token(**up)
         self.assertEqual(classify(t, curve(1.2), NOW + 90, RULES)['state'], 'dead')
@@ -68,6 +68,9 @@ class ReservoirTests(unittest.TestCase):
         self.assertEqual(blocker(fast, NOW, RULES, launches=9), 'serial creator')
         self.assertEqual(blocker(token(state='alive', real_sol=6, traction=3, promotions=3), NOW, RULES, 1),
                          'watched enough')
+        # A reading from before the sweep stopped must not promote anything.
+        self.assertEqual(blocker(token(state='alive', real_sol=6, traction=3, checked_at=NOW - 900), NOW, RULES, 1),
+                         'stale reading')
 
     def test_dev_buy_units(self):
         self.assertAlmostEqual(dev_buy_pct({'dev_tokens': 50e6}), 5)

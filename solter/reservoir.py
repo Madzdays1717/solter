@@ -29,6 +29,7 @@ class ReservoirRules:
     max_dev_buy_pct: float = 15.0
     max_creator_launches: int = 3    # 0 = off
     migrated_minutes: float = 15     # a migration stays a candidate this long
+    stale_after: float = 300         # seconds; an older inflow reading cannot promote a token
 
 
 def dev_buy_pct(token: dict) -> float | None:
@@ -105,6 +106,8 @@ def blocker(token: dict, now: float, rules: ReservoirRules, launches: int) -> st
         return None
     if (token.get('progress') or 0) > rules.max_progress:
         return 'late on curve'
+    if now - (token.get('checked_at') or 0) > rules.stale_after:
+        return 'stale reading'
     community = (token.get('real_sol') or 0) - (token.get('dev_sol') or 0)
     if community < rules.promote_min_sol:
         return 'little inflow'

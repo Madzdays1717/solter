@@ -49,7 +49,9 @@ CREATE TABLE IF NOT EXISTS outcomes (
   milestone REAL NOT NULL DEFAULT 1, dev_sold INTEGER NOT NULL DEFAULT 0,
   dev_alerted INTEGER NOT NULL DEFAULT 0, gap INTEGER NOT NULL DEFAULT 0,
   done INTEGER NOT NULL DEFAULT 0);
-CREATE TABLE IF NOT EXISTS budget (day TEXT PRIMARY KEY, used INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS spend (
+  day TEXT NOT NULL, kind TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day, kind));
+DROP TABLE IF EXISTS budget;
 CREATE TABLE IF NOT EXISTS metrics (key TEXT PRIMARY KEY, n INTEGER NOT NULL DEFAULT 0);
 '''
 
@@ -292,19 +294,19 @@ class Store:
             ORDER BY peak_mcap_sol/first_mcap_sol DESC LIMIT 15''', (since, ratio))
 
     # budget and upkeep ----------------------------------------------------
-    def budget_claim(self, limit: int) -> bool:
+    def budget_claim(self, kind: str):
+        """Count one RPC request of `kind` today (UTC). The ceiling is decided by rpc.allowed."""
         day = time.strftime('%Y-%m-%d', time.gmtime())
-        self.db.execute('INSERT OR IGNORE INTO budget(day, used) VALUES(?, 0)', (day,))
-        if self.db.execute('SELECT used FROM budget WHERE day=?', (day,)).fetchone()[0] >= limit:
-            return False
-        self.db.execute('UPDATE budget SET used=used+1 WHERE day=?', (day,))
+        self.db.execute('INSERT INTO spend(day, kind, used) VALUES(?, ?, 1) '
+                        'ON CONFLICT(day, kind) DO UPDATE SET used = used + 1', (day, kind))
         self.db.commit()
-        return True
+
+    def budget_by_kind(self) -> dict:
+        day = time.strftime('%Y-%m-%d', time.gmtime())
+        return {r['kind']: r['used'] for r in self.db.execute('SELECT kind, used FROM spend WHERE day=?', (day,))}
 
     def budget_used(self) -> int:
-        day = time.strftime('%Y-%m-%d', time.gmtime())
-        row = self.db.execute('SELECT used FROM budget WHERE day=?', (day,)).fetchone()
-        return row[0] if row else 0
+        return sum(self.budget_by_kind().values())
 
     def cleanup(self, now: float):
         self.db.execute('DELETE FROM trades WHERE at<?', (now - 2 * 86400,))
@@ -312,7 +314,7 @@ class Store:
         self.db.execute("DELETE FROM tokens WHERE state IN ('dead','expired') AND created_at<?",
                         (now - 3 * 86400,))
         self.db.execute('DELETE FROM creators WHERE last_seen<?', (now - 7 * 86400,))
-        self.db.execute('DELETE FROM budget WHERE day<?',
+        self.db.execute('DELETE FROM spend WHERE day<?',
                         (time.strftime('%Y-%m-%d', time.gmtime(now - 7 * 86400)),))
         self.db.commit()
 
@@ -322,4 +324,5 @@ class Store:
                 'calls': {r[0]: r[1] for r in self.db.execute(
                     'SELECT state, COUNT(*) FROM calls GROUP BY state')},
                 'metrics': self.metrics(),
-                'rpc_today': self.budget_used()}
+                'rpc_today': self.budget_used(),
+                'rpc_today_by_kind': self.budget_by_kind()}

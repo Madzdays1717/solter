@@ -98,6 +98,9 @@ Nama Koin ($SYM)
 🛡️ Mint & freeze authority dicabut
 ```
 
+Gambar token tampil sebagai pratinjau link di atas pesan. Pesan tetap terkirim walaupun server
+gambar (IPFS) lambat.
+
 Balasan otomatis di bawah call: `🚀 SYM 2.1x sejak call` (2x, 3x, 5x, 10x) dan peringatan jika
 dev menjual setelah call (`FOLLOWUP_ALERTS=false` untuk mematikan).
 
@@ -107,19 +110,27 @@ Default memakai RPC publik `api.mainnet-beta.solana.com` (gratis, tanpa daftar).
 yang lebih stabil, pakai endpoint free tier milik Anda sendiri (HTTPS + WSS) di `.env`.
 
 Solter menjaga batasnya sendiri: `RPC_REQUESTS_PER_MIN` (default 60) dan
-`RPC_REQUESTS_PER_DAY` (default 15.000, reset 00:00 UTC). Pembagian per hari:
+`RPC_REQUESTS_PER_DAY` (default 15.000, reset 00:00 UTC = 07:00 WIB). Setiap jenis kerja punya
+jatah yang dicadangkan:
 
-- sweep reservoir: maksimal 60% (interval otomatis melambat jika budget kecil)
-- backfill trade: sampai 75%
-- fallback transaksi: sampai 85%
-- cek mendalam sebelum call dan pelacakan: sisanya
+- sweep reservoir (mencari token yang mulai ramai): 45%, intervalnya otomatis melambat jika budget kecil
+- cek mendalam sebelum call dan pelacakan: 25%
+- backfill trade saat token mulai dipantau: 15%
+- fallback transaksi: 15%
+
+Satu jenis kerja boleh memakai lebih dari jatahnya hanya dari sisa yang tidak lagi dibutuhkan jenis
+lain untuk sisa hari itu. Jadi backfill atau fallback tidak bisa menghabiskan jatah sweep, dan
+pencarian token baru tidak berhenti di tengah hari. Pemakaian per jenis terlihat di
+`python bot.py stats` (`rpc_today_by_kind`).
 
 Trade live **tidak** memakai budget karena dibaca dari log WebSocket. Jika provider Anda punya
 kuota kredit, sesuaikan `RPC_REQUESTS_PER_DAY` dengan biaya kredit per metode di provider itu.
 
 ## Menyetel filter
 
-Semua ambang ada di `.env.example` dengan penjelasan. Cara yang disarankan:
+Semua ambang ada di `.env.example` dengan penjelasan. Default `MIN_SCORE=0`: setiap token yang
+lolos semua filter di-call dengan grade A/B/C di pesannya, supaya `report` punya data per grade.
+Cara yang disarankan:
 
 1. Jalankan 24-72 jam dengan default.
 2. `python bot.py report`: lihat hit rate per grade dan bagian *"Token yang naik ≥3x ... tanpa call"*.

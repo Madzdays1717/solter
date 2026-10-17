@@ -23,7 +23,7 @@ class QualityRules:
     max_creator_launches: int = 3    # launches seen from this creator (this one included); 0 = off
     max_progress: float = 85.0       # bonding curve progress, percent
     require_socials: bool = False
-    min_score: int = 50
+    min_score: int = 0
 
 
 @dataclass(frozen=True)

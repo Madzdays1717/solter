@@ -12,6 +12,7 @@ import json
 import logging
 import random
 import time
+from collections import deque
 from dataclasses import replace
 
 import aiohttp
@@ -26,7 +27,7 @@ from .events import (Trade, cpi_payloads, decode_amm_trade, decode_pump_trade, l
 from .flow import Flow, evaluate
 from .quality import Assessment, holder_stats, quality_reason, score, socials_from
 from .reservoir import candidates, classify, dev_buy_pct
-from .rpc import BACKFILL, DECISION, FALLBACK, SWEEP, BoundedRPC, NoBudget
+from .rpc import BACKFILL, DECISION, FALLBACK, QUOTAS, SWEEP, BoundedRPC, NoBudget
 from .sources import DEX, PUMP_WS, pair_facts, parse_portal, pumpswap_pair, sol_usd_from
 from .storage import HORIZONS, Store
 from .telegram import Telegram, call_text, dev_sold_text, milestone_text
@@ -34,6 +35,7 @@ from .telegram import Telegram, call_text, dev_sold_text, milestone_text
 LOG = logging.getLogger('solter')
 TX_OPTIONS = {'encoding': 'jsonParsed', 'commitment': 'confirmed', 'maxSupportedTransactionVersion': 1}
 MILESTONES = (2, 3, 5, 10)
+METADATA_RETRY = 300    # a metadata fetch that failed is tried again after this
 CHECK_TTL = 45          # seconds a passing deep check is reused
 FAILED_CHECK_TTL = 120  # a failing one changes slowly (holders, dev): look again less often
 COOLDOWN = 300          # seconds before a demoted token may be watched again
@@ -45,7 +47,8 @@ class Solter:
         self.db = store
         self.rules = cfg.rules()
         self.quality = cfg.quality_rules()
-        self.reservoir = cfg.reservoir_rules()
+        # A traction reading older than a few sweeps no longer says anything about now.
+        self.reservoir = replace(cfg.reservoir_rules(), stale_after=max(300.0, 3 * self.sweep_interval(2)))
         self.session = None
         self.rpc: BoundedRPC | None = None
         self.tg: Telegram | None = None
@@ -64,6 +67,8 @@ class Solter:
         self.reasons: dict = {}
         self.dex_lock = asyncio.Lock()
         self.last_dex = 0.0
+        self.lags: deque = deque(maxlen=200)    # event timestamp minus arrival time, live trades
+        self.clock_warned = 0.0
 
     def attach(self, session):
         self.session = session
@@ -122,7 +127,7 @@ class Solter:
     def sweep_interval(self, requests: int) -> float:
         """Never let a whole day of sweeping use more than the sweep's share of the budget."""
         return max(self.cfg.sweep_seconds,
-                   86400 * max(1, requests) / max(1.0, self.cfg.rpc_per_day * SWEEP))
+                   86400 * max(1, requests) / max(1.0, self.cfg.rpc_per_day * QUOTAS[SWEEP]))
 
     async def sweep(self):
         while self.running:
@@ -142,7 +147,7 @@ class Solter:
             result = await self.rpc.call('getMultipleAccounts', [
                 [t['account'] for t in chunk],
                 {'encoding': 'base64', 'commitment': 'confirmed',
-                 'dataSlice': {'offset': 0, 'length': CURVE_BYTES}}], share=SWEEP)
+                 'dataSlice': {'offset': 0, 'length': CURVE_BYTES}}], kind=SWEEP)
             requests += 1
             values = result.get('value') if isinstance(result, dict) else None
             if not isinstance(values, list) or len(values) != len(chunk):
@@ -168,7 +173,7 @@ class Solter:
     def schedule(self, now: float):
         for t in self.db.watching():
             started = t['watch_started'] or now
-            idle = now - (t['last_trade_at'] or started)
+            idle = self.chain_now(now) - (t['last_trade_at'] or started)
             if now >= (t['watch_until'] or 0):
                 self.db.demote(t['mint'], now, COOLDOWN, 'watched without a call')
                 self.db.metric('watch_ended')
@@ -294,12 +299,35 @@ class Solter:
             return
         trades, need_tx = trades_from_logs(logs, mint, account, stage, slot)
         if trades:
+            self.observe_clock(trades)
             self.ingest(mint, signature, trades)
             self.db.metric('trade_from_logs')
         elif need_tx:
             self.queue_tx(mint, signature)
         else:
             self.db.mark(mint, signature)
+
+    def observe_clock(self, trades: list[Trade]):
+        """Trades are judged in chain time: learn how far this device's clock is from it."""
+        arrived = time.time()
+        self.lags.extend(t.at - arrived for t in trades)
+        offset = self.clock_offset()
+        if offset and arrived - self.clock_warned > 3600:
+            self.clock_warned = arrived
+            LOG.warning('Device clock differs %.0f s from the blockchain clock; turn on automatic '
+                        'time in Android settings (Solter corrects for it meanwhile)', -offset)
+
+    def clock_offset(self) -> float:
+        """Chain clock minus device clock. A trade only ever arrives after it happened, so delay
+        lowers each sample; the highest sample is the closest to the true difference. Small
+        differences (normal latency, whole-second block times) are left alone."""
+        if len(self.lags) < 10:
+            return 0.0
+        offset = max(self.lags)
+        return offset if abs(offset) > 5 else 0.0
+
+    def chain_now(self, now: float | None = None) -> float:
+        return (time.time() if now is None else now) + self.clock_offset()
 
     def ingest(self, mint: str, signature: str, trades: list[Trade]):
         now = time.time()
@@ -342,7 +370,7 @@ class Solter:
                 if not token or token['state'] not in ('watching', 'called') or self.db.seen(mint, signature):
                     continue
                 try:
-                    tx = await self.rpc.call('getTransaction', [signature, TX_OPTIONS], share=FALLBACK)
+                    tx = await self.rpc.call('getTransaction', [signature, TX_OPTIONS], kind=FALLBACK)
                 except NoBudget:
                     self.db.metric('fallback_no_budget')
                     continue
@@ -386,7 +414,7 @@ class Solter:
         options = {'limit': self.cfg.backfill_tx, 'commitment': 'confirmed'}
         if token['last_sig']:
             options['until'] = token['last_sig']
-        items = await self.rpc.call('getSignaturesForAddress', [token['account'], options], share=BACKFILL)
+        items = await self.rpc.call('getSignaturesForAddress', [token['account'], options], kind=BACKFILL)
         if not isinstance(items, list):
             return
         oldest = time.time() - self.rules.window
@@ -396,7 +424,7 @@ class Solter:
                 continue
             if (item.get('blockTime') or oldest) < oldest:
                 continue
-            tx = await self.rpc.call('getTransaction', [signature, TX_OPTIONS], share=BACKFILL)
+            tx = await self.rpc.call('getTransaction', [signature, TX_OPTIONS], kind=BACKFILL)
             if tx is None:
                 continue
             trades = trades_from_tx(tx, mint, token['account'], token['stage'])
@@ -412,7 +440,12 @@ class Solter:
             async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=12)) as r:
                 if r.status != 200:
                     return None
-                return json.loads(await r.content.read(limit))
+                body = bytearray()
+                async for chunk in r.content.iter_chunked(65536):   # read() may return a partial body
+                    body += chunk
+                    if len(body) > limit:
+                        return None
+                return json.loads(bytes(body))
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError, UnicodeDecodeError):
             return None
 
@@ -443,8 +476,9 @@ class Solter:
         mint, uri = token['mint'], token.get('uri')
         if not uri:
             return None
-        if mint in self.metadata:
-            return self.metadata[mint][1]
+        cached = self.metadata.get(mint)
+        if cached and (cached[1] is not None or time.time() - cached[0] < METADATA_RETRY):
+            return cached[1]
         if uri.startswith('ipfs://'):
             uri = 'https://ipfs.io/ipfs/' + uri[len('ipfs://'):]
         data = await self.http_json(uri, 65536)
@@ -457,7 +491,7 @@ class Solter:
         while self.running:
             for token in self.db.watching():
                 try:
-                    await self.consider(token, time.time())
+                    await self.consider(token, self.chain_now())
                 except NoBudget:
                     LOG.warning('RPC budget used up; deep checks wait for tomorrow (UTC)')
                     break
@@ -503,7 +537,7 @@ class Solter:
 
     async def account(self, address: str, encoding: str) -> dict | None:
         result = await self.rpc.call('getAccountInfo', [address, {'encoding': encoding,
-                                                                   'commitment': 'confirmed'}], share=DECISION)
+                                                                   'commitment': 'confirmed'}], kind=DECISION)
         value = result.get('value') if isinstance(result, dict) else None
         return value if isinstance(value, dict) else None
 
@@ -558,7 +592,7 @@ class Solter:
         if not price:
             return Assessment('price unknown')
         largest = await self.rpc.call('getTokenLargestAccounts', [mint, {'commitment': 'confirmed'}],
-                                      share=DECISION)
+                                      kind=DECISION)
         rows = largest.get('value') if isinstance(largest, dict) else None
         if not isinstance(rows, list):
             return Assessment('holders unavailable')
@@ -573,7 +607,7 @@ class Solter:
 
     async def dev_balance(self, owner: str, mint: str) -> int | None:
         result = await self.rpc.call('getTokenAccountsByOwner', [
-            owner, {'mint': mint}, {'encoding': 'jsonParsed', 'commitment': 'confirmed'}], share=DECISION)
+            owner, {'mint': mint}, {'encoding': 'jsonParsed', 'commitment': 'confirmed'}], kind=DECISION)
         accounts = result.get('value') if isinstance(result, dict) else None
         if not isinstance(accounts, list):
             return None

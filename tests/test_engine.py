@@ -23,8 +23,8 @@ class FakeRPC:
         self.handlers = handlers
         self.calls = []
 
-    async def call(self, method, params, share=1.0):
-        self.calls.append((method, params, share))
+    async def call(self, method, params, kind='decision'):
+        self.calls.append((method, params, kind))
         handler = self.handlers.get(method)
         return handler(params) if callable(handler) else handler
 
@@ -103,7 +103,7 @@ class EngineTests(unittest.TestCase):
     def buys(self, n=10, sol=.6):
         now = time.time()
         for i in range(n):
-            payload = pump_event(addr(f'buyer{i}'), sol, ts=now - 100 + i * 9,
+            payload = pump_event(addr(f'buyer{i}'), sol, ts=now - 81 + i * 9,
                                  vsol=(38 + i) * 10**9, vtok=int(850e12 - i * 1e12))
             self.bot.on_logs(MINT, CURVE, 'new', f'sig{i}', logs([payload]), 1000 + i)
 
@@ -227,7 +227,63 @@ class EngineTests(unittest.TestCase):
     def test_sweep_interval_respects_the_budget(self):
         self.assertEqual(self.bot.sweep_interval(1), 30)
         small = Solter(Config(rpc_per_day=1800), self.db)
-        self.assertAlmostEqual(small.sweep_interval(1), 80)
+        self.assertAlmostEqual(small.sweep_interval(1), 86400 / (1800 * .45))
+        self.assertAlmostEqual(small.reservoir.stale_after, 3 * small.sweep_interval(2))
+        self.assertEqual(self.bot.reservoir.stale_after, 300)
+
+    def test_device_clock_behind_the_chain_is_corrected(self):
+        now = time.time()
+        for i in range(12):
+            payload = pump_event(addr(f'c{i}'), .5, ts=now + 30 - (i % 3))   # phone 30 s slow
+            self.bot.on_logs(MINT, CURVE, 'new', f'clk{i}', logs([payload]), i)
+        self.assertAlmostEqual(self.bot.clock_offset(), 30, delta=1.5)
+        self.assertAlmostEqual(self.bot.chain_now(now), now + 30, delta=1.5)
+        self.assertGreater(self.bot.clock_warned, 0)
+        self.bot.lags.clear()
+        self.bot.lags.extend([-2.0, -1.0, -3.0] * 5)    # ordinary latency: no correction
+        self.assertEqual(self.bot.clock_offset(), 0.0)
+
+    def test_metadata_failure_is_retried_later(self):
+        token = {'mint': MINT, 'uri': 'https://ipfs.io/ipfs/Qm'}
+        answers = [None, {'twitter': 'https://x.com/a'}]
+
+        async def fetch(url, limit=0):
+            return answers.pop(0)
+        self.bot.http_json = fetch
+        self.assertIsNone(asyncio.run(self.bot.token_metadata(token)))
+        self.assertIsNone(asyncio.run(self.bot.token_metadata(token)))          # cached for a while
+        self.bot.metadata[MINT] = (time.time() - 400, None)
+        self.assertEqual(asyncio.run(self.bot.token_metadata(token)), {'twitter': 'https://x.com/a'})
+
+    def test_http_json_reads_a_body_sent_in_parts(self):
+        from aiohttp import web
+        big = json.dumps([{'pair': i, 'pad': 'x' * 100} for i in range(160)]).encode()
+
+        async def handler(request):
+            response = web.StreamResponse(headers={'Content-Type': 'application/json'})
+            await response.prepare(request)
+            await response.write(big[:len(big) // 2])
+            await asyncio.sleep(.05)
+            await response.write(big[len(big) // 2:])
+            await response.write_eof()
+            return response
+
+        async def run():
+            app = web.Application()
+            app.router.add_get('/pairs', handler)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, '127.0.0.1', 0)
+            await site.start()
+            port = runner.addresses[0][1]
+            try:
+                async with aiohttp.ClientSession() as session:
+                    self.bot.session = session
+                    return await self.bot.http_json(f'http://127.0.0.1:{port}/pairs')
+            finally:
+                await runner.cleanup()
+        result = asyncio.run(run())
+        self.assertEqual(len(result), 160)
 
     def test_logs_websocket_routes_notifications(self):
         self.watched()

@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.0.1 (2026-10-17): perbaikan hasil audit "call tidak datang"
+
+- **Budget RPC per jenis kerja.** Sebelumnya semua jenis memakai satu penghitung harian, dan sweep
+  (satu-satunya pencari token baru) yang pertama dihentikan di 60%. Akibatnya beberapa jam setelah
+  07:00 WIB tidak ada token baru yang dipantau sampai hari berikutnya. Sekarang setiap jenis punya
+  jatah tercadang (sweep 45%, keputusan 25%, backfill 15%, fallback 15%) dan hanya boleh meminjam
+  sisa yang tidak dibutuhkan jenis lain. Tabel `spend` menggantikan `budget`.
+- `BACKFILL_TX` default 8 → 3. Bacaan sweep yang sudah basi tidak bisa lagi mempromosikan token.
+- **Respons HTTP dibaca utuh.** `read(n)` aiohttp bisa mengembalikan sebagian body, jadi JSON
+  DexScreener/metadata sering gagal: token migrasi selalu ditolak ("thin liquidity"), sosial tidak
+  terbaca, harga USD kosong. Metadata yang gagal dicoba lagi setelah 5 menit.
+- **Call tidak lagi bergantung pada server gambar.** Dulu `sendPhoto` dengan URL IPFS bisa timeout
+  sehingga call dianggap terkirim tapi tidak pernah muncul. Sekarang satu `sendMessage` dengan
+  gambar sebagai pratinjau link.
+- `MIN_SCORE` default 50 → 0: token yang lolos semua filter tetap di-call dengan label grade.
+- Koreksi jam: aliran beli dinilai dengan jam blockchain bila jam HP meleset > 5 detik, dengan peringatan.
+
 ## v2.0.0 (2026-10-17): dibangun ulang
 
 - **Reservoir**: semua launch PumpPortal dicatat; sweep `getMultipleAccounts` (100 bonding curve

@@ -32,7 +32,7 @@ class Config:
     promote_min_sol: float = 1.0
     max_watch: int = 8
     watch_seconds: int = 300
-    backfill_tx: int = 8
+    backfill_tx: int = 3
     # Flow gates
     min_buys: int = 8
     min_buyers: int = 6
@@ -52,7 +52,7 @@ class Config:
     max_progress: float = 85.0
     require_socials: bool = False
     require_mint_check: bool = True
-    min_score: int = 50
+    min_score: int = 0
     min_liquidity_usd: float = 5000.0
     # Calls and follow-up
     max_calls_per_hour: int = 5

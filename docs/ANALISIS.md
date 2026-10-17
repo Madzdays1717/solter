@@ -89,7 +89,9 @@ Skor bukan prediksi; ini urutan kualitas setup supaya hasil bisa dibandingkan pe
 - **Distribusi (30)**: top-10 (30%→0, 10%→penuh) 15 · holder terbesar (10%→0, 2%→penuh) 5 · dev (10%→0, 0%→penuh) 10
 - **Konteks (30)**: sosial (3 link = penuh) 10 · creator launch pertama 10 / kedua 5 · tekanan jual rendah 5 · tanpa bundle 5
 
-Grade **A ≥ 75**, **B ≥ 60**, **C** di bawahnya. Default hanya call dengan skor ≥ 50 (`MIN_SCORE`).
+Grade **A ≥ 75**, **B ≥ 60**, **C** di bawahnya. Default `MIN_SCORE=0`: skor tidak menolak token,
+hanya memberi label, karena token yang lolos semua filter tapi biasa saja bisa hanya mendapat 40-49.
+Naikkan `MIN_SCORE` setelah `report` menunjukkan grade mana yang hasilnya buruk.
 
 ## 6. Cara membuktikan dan menyetel
 

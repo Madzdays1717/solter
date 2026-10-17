@@ -21,13 +21,13 @@
 | Worker | Kerja | Biaya |
 |---|---|---|
 | `discover` | WebSocket PumpPortal: launch → reservoir (alamat curve diturunkan lokal), migrasi → pool PumpSwap diturunkan lokal | gratis |
-| `sweep` | `getMultipleAccounts` (100 curve/request, `dataSlice` 115 byte): alive / dead / inflow | ≤ 60% budget |
+| `sweep` | `getMultipleAccounts` (100 curve/request, `dataSlice` 115 byte): alive / dead / inflow | jatah 45% |
 | `scheduler` | Akhiri watch (waktu habis, sepi 90 dtk, cooldown 5 mnt), isi slot dari kandidat (maks ⅓ slot untuk migrasi) | 0 |
 | `logs` | Satu WebSocket Solana, `logsSubscribe` per akun yang dipantau atau dilacak; trade di-decode dari log | 0 |
-| `transactions` | `getTransaction` hanya bila log menunjukkan Buy/Sell tanpa event yang terbaca (atau log terpotong) | ≤ 85% |
-| `backfill` | Saat token mulai dipantau / setelah putus: `getSignaturesForAddress` (`until` = signature terakhir) + transaksi dalam jendela | ≤ 75% |
+| `transactions` | `getTransaction` hanya bila log menunjukkan Buy/Sell tanpa event yang terbaca (atau log terpotong) | jatah 15% |
+| `backfill` | Saat token mulai dipantau / setelah putus: `getSignaturesForAddress` (`until` = signature terakhir) + transaksi dalam jendela | jatah 15% |
 | `sol_price` | Harga SOL/USD dari DexScreener tiap 60 dtk | gratis |
-| `evaluator` | Tiap 4 dtk: gerbang flow → cek mendalam (cache 45 dtk lolos / 120 dtk gagal) → skor → call | 4 request per cek |
+| `evaluator` | Tiap 4 dtk: gerbang flow → cek mendalam (cache 45 dtk lolos / 120 dtk gagal) → skor → call | jatah 25%, 4 request per cek |
 | `tracker` | Return 5/15/30/60 mnt, puncak/low, balasan 2x/3x/5x/10x, peringatan dev jual | hampir 0 |
 | `maintenance` | Kedaluwarsa reservoir, retensi, cache, log `STATUS` tiap 5 mnt | 0 |
 
@@ -47,7 +47,13 @@ migrasi: token apa pun (kecuali sudah di-call) ──► alive, stage=migrated, 
 ## Aturan yang dijaga
 
 - **Satu call per mint**, dicatat sebelum dikirim. Timeout Telegram = `uncertain`, tidak diulang.
-  Foto ditolak → satu kali teks.
+  Call = satu `sendMessage`; gambar hanya pratinjau link, jadi server gambar yang lambat tidak
+  menahan call. Pesan ditolak (tidak terkirim) → sekali lagi tanpa pratinjau.
+- **Budget per jenis kerja** (`rpc.allowed`): sweep 45%, keputusan 25%, backfill 15%, fallback 15%.
+  Lewat jatahnya, satu jenis hanya boleh memakai kapasitas yang tidak dicadangkan jenis lain untuk
+  sisa hari (UTC). Token yang bacaan sweep-nya lebih tua dari `stale_after` tidak dipromosikan.
+- **Waktu chain**: aliran beli dinilai dengan jam blockchain. Jika jam HP berbeda > 5 dtk
+  (perkiraan: selisih terbesar waktu event − waktu tiba), Solter mengoreksinya dan memberi peringatan.
 - **Fail closed**: mint/freeze authority aktif, ekstensi Token-2022 tak dikenal, curve tidak
   terbaca, quote bukan SOL, Mayhem, pool yang base/quote-nya tidak cocok, holder tidak tersedia,
   harga tidak diketahui → tidak ada call.

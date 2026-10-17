@@ -11,9 +11,6 @@ import aiohttp
 from .flow import Flow
 from .quality import Assessment, grade
 
-CAPTION_LIMIT = 1000
-
-
 def usd(value: float) -> str:
     if value >= 1e6:
         return f'${value / 1e6:.2f}M'
@@ -122,15 +119,17 @@ class Telegram:
             return 'uncertain', None
 
     async def call(self, text: str, mint: str, image: str | None) -> tuple[str, int | None]:
-        """One photo with caption, or one text. A rejected photo falls back to text once;
-        an uncertain result (timeout) is not retried, so a call is never duplicated."""
-        common = {'chat_id': self.chat, 'parse_mode': 'HTML', 'reply_markup': links(mint)}
-        state, message_id = 'rejected', None
-        if image and len(text) <= CAPTION_LIMIT:
-            state, message_id = await self.send('sendPhoto', {**common, 'photo': image, 'caption': text})
-        if state == 'rejected':
-            state, message_id = await self.send('sendMessage', {
-                **common, 'text': text, 'link_preview_options': json.dumps({'is_disabled': True})})
+        """One sendMessage; the token image, if any, is only its link preview, so a slow image
+        host can never hold the call back. A rejected message (nothing was posted) is sent once
+        more without the preview; an uncertain result (timeout) is not retried, so a call is
+        never duplicated."""
+        common = {'chat_id': self.chat, 'parse_mode': 'HTML', 'reply_markup': links(mint), 'text': text}
+        plain = json.dumps({'is_disabled': True})
+        preview = (json.dumps({'url': image, 'prefer_large_media': True, 'show_above_text': True})
+                   if image else plain)
+        state, message_id = await self.send('sendMessage', {**common, 'link_preview_options': preview})
+        if state == 'rejected' and preview != plain:
+            state, message_id = await self.send('sendMessage', {**common, 'link_preview_options': plain})
         return state, message_id
 
     async def reply(self, text: str, message_id: int | None) -> str:

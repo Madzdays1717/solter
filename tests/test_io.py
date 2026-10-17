@@ -1,16 +1,18 @@
 """RPC budget, Telegram delivery, the report and configuration."""
 import asyncio
+import json
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from helpers import MINT, addr
 from solter.config import Config
 from solter.flow import Flow
 from solter.quality import Assessment, Holders, Socials
 from solter.report import build, render
-from solter.rpc import SWEEP, BoundedRPC, NoBudget
+from solter.rpc import BoundedRPC, NoBudget, allowed, day_left
 from solter.sources import pair_facts, parse_portal, pumpswap_pair, sol_usd_from
 from solter.storage import Store
 from solter.telegram import Telegram, call_text
@@ -54,22 +56,31 @@ class StoreCase(unittest.TestCase):
 
 
 class RPCTests(StoreCase):
-    def test_budget_shares_and_hard_limit(self):
-        session = FakeSession()
-        rpc = BoundedRPC('https://rpc', self.db, 100, 10, session)
+    def test_kinds_keep_their_reservation(self):
+        day = 100   # quotas: sweep 45, backfill 15, fallback 15, decision 25
+        self.assertTrue(allowed('sweep', {'backfill': 15}, day, 1.0))
+        self.assertFalse(allowed('backfill', {'backfill': 15}, day, 1.0))       # sweep's share is untouchable
+        self.assertFalse(allowed('sweep', {'sweep': 45}, day, 1.0))
+        self.assertTrue(allowed('backfill', {'backfill': 15, 'sweep': 40}, day, .1))   # late: spare may be borrowed
+        self.assertFalse(allowed('decision', {'sweep': 60, 'backfill': 40}, day, .5))  # hard daily ceiling
+        self.assertEqual(round(day_left(86400 * 3 + 21600), 2), .75)
 
-        async def run():
-            for _ in range(6):
-                self.assertEqual(await rpc.call('getAccountInfo', ['a'], share=SWEEP), {'ok': True})
-            with self.assertRaises(NoBudget):
-                await rpc.call('getMultipleAccounts', [[]], share=SWEEP)   # sweep may use 60%
-            for _ in range(4):
-                await rpc.call('getAccountInfo', ['a'])                     # decisions use the rest
-            with self.assertRaises(NoBudget):
-                await rpc.call('getAccountInfo', ['a'])
-        asyncio.run(run())
-        self.assertEqual(session.attempts, 10)
-        self.assertEqual(self.db.budget_used(), 10)
+    def test_heavy_backfill_cannot_stop_the_sweep(self):
+        session = FakeSession()
+        rpc = BoundedRPC('https://rpc', self.db, 1000, 20, session)
+
+        async def spend(kind):
+            n = 0
+            while True:
+                try:
+                    await rpc.call('m', [], kind=kind)
+                except NoBudget:
+                    return n
+                n += 1
+        with patch('solter.rpc.day_left', return_value=1.0):
+            used = {k: asyncio.run(spend(k)) for k in ('backfill', 'fallback', 'decision', 'sweep')}
+        self.assertEqual(used, {'backfill': 3, 'fallback': 3, 'decision': 5, 'sweep': 9})
+        self.assertEqual((session.attempts, self.db.budget_used()), (20, 20))
 
     def test_rpc_error_is_none(self):
         session = FakeSession(FakeResponse(body={'error': {'code': -32015}}))
@@ -78,31 +89,33 @@ class RPCTests(StoreCase):
 
 
 class TelegramTests(unittest.TestCase):
-    def run_call(self, results, text='hello', image='https://img/x.png'):
+    def run_call(self, results, image='https://ipfs.io/ipfs/Qm'):
         sent = []
         tg = Telegram('token', 'chat', None)
 
         async def send(method, payload):
             sent.append((method, payload))
-            return results.get(method, ('sent', 7))
+            return results.pop(0) if results else ('sent', 7)
         tg.send = send
-        return asyncio.run(tg.call(text, MINT, image)), sent
+        return asyncio.run(tg.call('hello', MINT, image)), sent
 
-    def test_photo_with_caption_once(self):
-        (state, mid), sent = self.run_call({})
-        self.assertEqual((state, mid, [m for m, _ in sent]), ('sent', 7, ['sendPhoto']))
+    def test_one_message_with_the_image_as_preview(self):
+        (state, mid), sent = self.run_call([])
+        self.assertEqual((state, mid, [m for m, _ in sent]), ('sent', 7, ['sendMessage']))
+        preview = json.loads(sent[0][1]['link_preview_options'])
+        self.assertEqual(preview['url'], 'https://ipfs.io/ipfs/Qm')
+        self.assertTrue(preview['show_above_text'])
 
-    def test_rejected_photo_falls_back_to_text_once(self):
-        (state, _), sent = self.run_call({'sendPhoto': ('rejected', None)})
-        self.assertEqual([m for m, _ in sent], ['sendPhoto', 'sendMessage'])
+    def test_rejected_message_is_sent_once_more_without_preview(self):
+        (state, _), sent = self.run_call([('rejected', None)])
+        self.assertEqual((state, len(sent)), ('sent', 2))
+        self.assertEqual(json.loads(sent[1][1]['link_preview_options']), {'is_disabled': True})
+        (state, _), sent = self.run_call([('rejected', None)], image=None)
+        self.assertEqual((state, len(sent)), ('rejected', 1))       # nothing to drop: no second try
 
     def test_uncertain_is_never_retried(self):
-        (state, _), sent = self.run_call({'sendPhoto': ('uncertain', None)})
-        self.assertEqual((state, [m for m, _ in sent]), ('uncertain', ['sendPhoto']))
-
-    def test_long_text_skips_the_caption(self):
-        (_, _), sent = self.run_call({}, text='x' * 1200)
-        self.assertEqual([m for m, _ in sent], ['sendMessage'])
+        (state, _), sent = self.run_call([('uncertain', None)])
+        self.assertEqual((state, len(sent)), ('uncertain', 1))
 
     def test_call_text_escapes_and_reports(self):
         token = {'mint': MINT, 'symbol': '<b>X', 'name': 'A&B', 'stage': 'new', 'created_at': time.time() - 400}
