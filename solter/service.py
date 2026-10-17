@@ -211,7 +211,7 @@ class Solter:
                 token=next((t for t in self.db.watching() if t['mint']==mint),None)
                 if not token or not token['curve']:continue
                 try:tx=await self.rpc.call('getTransaction',[sig,{
-                    'encoding':'jsonParsed','commitment':'confirmed','maxSupportedTransactionVersion':0}])
+                    'encoding':'jsonParsed','commitment':'confirmed','maxSupportedTransactionVersion':1}])
                 except NoBudget:
                     await asyncio.sleep(30);continue
                 if tx is None:continue
