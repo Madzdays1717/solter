@@ -30,7 +30,7 @@ class Config:
     alive_min_sol: float = 0.5
     promote_min_rate: float = 0.5
     promote_min_sol: float = 1.0
-    max_watch: int = 16
+    max_watch: int = 50
     eval_concurrency: int = 3
     quiet_seconds: int = 60
     rpc_fallback: str = ''
@@ -55,11 +55,19 @@ class Config:
     max_progress: float = 85.0
     require_socials: bool = False
     require_mint_check: bool = True
-    min_score: int = 0
+    min_score: int = 0  # legacy; floor below also applies
+    call_quality_score_floor: int = 60
+    followup_milestones: bool = False
     min_liquidity_usd: float = 5000.0
     # Calls and follow-up
     # Independent free DexScreener momentum radar; no wallet calls per candidate.
     radar_enabled: bool = True
+    radar_concurrency: int = 2
+    radar_max_sample_age: int = 45
+    radar_min_price_rise: float = 1.0
+    radar_max_liquidity_drop: float = 10.0
+    rpc_rps: float = 5.0
+    rpc_method_rps: float = 2.0
     radar_interval: float = 4.0
     radar_batch: int = 120
     radar_minutes: int = 30
@@ -69,7 +77,16 @@ class Config:
     radar_min_buys_5m: int = 8
     radar_min_buy_ratio: float = 1.2
     radar_min_mc_change_pct: float = 4.0
-    radar_max_alerts_per_hour: int = 60
+    radar_max_alerts_per_hour: int = 60  # legacy; independent ceiling below
+    radar_min_liquidity_usd: float = 2500
+    radar_max_volume_liquidity_ratio: float = 12.0
+    radar_max_change_5m_pct: float = 35.0
+    radar_confirm_seconds: int = 15
+    radar_min_confirm_mc_rise_pct: float = 2.0
+    radar_min_extra_buys: int = 4
+    radar_min_extra_volume_usd: float = 500.0
+    radar_quality_max_alerts_per_hour: int = 4
+    radar_alert_gap_seconds: int = 600
     max_calls_per_hour: int = 5
     track_minutes: int = 60
     followups: bool = True
@@ -142,6 +159,12 @@ class Config:
 
 # field -> (environment variable, minimum, maximum); booleans ignore the bounds.
 ENV = {
+    'radar_concurrency': ('RADAR_CONCURRENCY', 1, 4),
+    'radar_max_sample_age': ('RADAR_MAX_SAMPLE_AGE_SECONDS', 15, 120),
+    'radar_min_price_rise': ('RADAR_CONFIRM_PRICE_RISE_PCT', 0, 20),
+    'radar_max_liquidity_drop': ('RADAR_MAX_LIQUIDITY_DROP_PCT', 0, 50),
+    'rpc_rps': ('RPC_REQUESTS_PER_SECOND', .1, 10),
+    'rpc_method_rps': ('RPC_METHOD_REQUESTS_PER_SECOND', .1, 4),
     'radar_enabled': ('RADAR_ENABLED', 0, 1),
     'radar_interval': ('RADAR_INTERVAL_SECONDS', 3, 60),
     'radar_batch': ('RADAR_BATCH_TOKENS', 30, 300),
@@ -153,6 +176,15 @@ ENV = {
     'radar_min_buy_ratio': ('RADAR_MIN_BUY_SELL_RATIO', 1, 20),
     'radar_min_mc_change_pct': ('RADAR_MIN_MC_CHANGE_PCT', 0, 1000),
     'radar_max_alerts_per_hour': ('RADAR_MAX_ALERTS_PER_HOUR', 1, 500),
+    'radar_min_liquidity_usd': ('RADAR_MIN_LIQUIDITY_USD', 0, 10000000),
+    'radar_max_volume_liquidity_ratio': ('RADAR_MAX_VOLUME_LIQUIDITY_RATIO', 1, 500),
+    'radar_max_change_5m_pct': ('RADAR_MAX_PRICE_CHANGE_5M_PCT', 6, 1000),
+    'radar_confirm_seconds': ('RADAR_CONFIRM_SECONDS', 5, 120),
+    'radar_min_confirm_mc_rise_pct': ('RADAR_CONFIRM_MC_RISE_PCT', 0, 100),
+    'radar_min_extra_buys': ('RADAR_MIN_EXTRA_BUYS', 1, 100),
+    'radar_min_extra_volume_usd': ('RADAR_MIN_EXTRA_VOLUME_USD', 0, 100000000),
+    'radar_quality_max_alerts_per_hour': ('RADAR_QUALITY_MAX_ALERTS_PER_HOUR', 1, 60),
+    'radar_alert_gap_seconds': ('RADAR_ALERT_GAP_SECONDS', 0, 3600),
     'eval_concurrency': ('EVAL_CONCURRENCY', 1, 8),
     'quiet_seconds': ('QUIET_SECONDS', 30, 300),
     'rpc_per_minute': ('RPC_REQUESTS_PER_MIN', 1, 600),
@@ -164,7 +196,7 @@ ENV = {
     'alive_min_sol': ('ALIVE_MIN_SOL', 0, 50),
     'promote_min_rate': ('PROMOTE_MIN_SOL_PER_MIN', 0, 50),
     'promote_min_sol': ('PROMOTE_MIN_SOL', 0, 100),
-    'max_watch': ('MAX_ACTIVE_TOKENS', 1, 30),
+    'max_watch': ('MAX_ACTIVE_TOKENS', 1, 50),
     'watch_seconds': ('WATCH_SECONDS', 60, 1800),
     'backfill_tx': ('BACKFILL_TX', 0, 30),
     'min_buys': ('MIN_BUYS', 1, 200),
@@ -185,6 +217,8 @@ ENV = {
     'require_socials': ('REQUIRE_SOCIALS', 0, 1),
     'require_mint_check': ('REQUIRE_MINT_CHECK', 0, 1),
     'min_score': ('MIN_SCORE', 0, 100),
+    'call_quality_score_floor': ('CALL_MIN_QUALITY_SCORE', 0, 100),
+    'followup_milestones': ('FOLLOWUP_MILESTONES', 0, 1),
     'min_liquidity_usd': ('MIN_LIQUIDITY_USD', 0, 10_000_000),
     'max_calls_per_hour': ('MAX_CALLS_PER_HOUR', 1, 60),
     'track_minutes': ('TRACK_MINUTES', 5, 240),

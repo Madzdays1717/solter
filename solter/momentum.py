@@ -24,7 +24,11 @@ def pick_pairs(payload, wanted: set[str]) -> dict[str, dict]:
     for pair in payload:
         if not isinstance(pair, dict) or pair.get('chainId') != 'solana':
             continue
-        mint = (pair.get('baseToken') or {}).get('address')
+        pair = dict(pair)
+        for key in ('baseToken', 'liquidity', 'volume', 'txns', 'priceChange'):
+            if not isinstance(pair.get(key), dict):
+                pair[key] = {}
+        mint = pair['baseToken'].get('address')
         if mint not in wanted:
             continue
         # Prefer the most liquid pool, not an arbitrary tiny duplicate pool.
@@ -78,3 +82,60 @@ def signal(pair: dict, previous: dict | None, *, min_mc: float, max_mc: float,
     return Signal(mc, vol, int(buys), int(sells), price_change,
                   change, number((pair.get('liquidity') or {}).get('usd')),
                   real_mc is None)
+
+
+def selective_signal(pair: dict, previous: dict | None, cfg) -> Signal | None:
+    """High-selectivity *screen*, not a proof of organic buyers or token safety.
+
+    New hard floors apply even if a v2.1.0 .env retains its formerly permissive
+    values. This intentionally reduces recall to avoid noisy Telegram alerts.
+    """
+    reading = signal(
+        pair, previous,
+        min_mc=max(5000, cfg.radar_min_mc_usd),
+        max_mc=min(100000, cfg.radar_max_mc_usd),
+        min_volume=max(4000, cfg.radar_min_volume_5m_usd),
+        min_buys=max(25, cfg.radar_min_buys_5m),
+        min_buy_ratio=max(1.8, cfg.radar_min_buy_ratio),
+        min_change_pct=max(6.0, cfg.radar_min_mc_change_pct),
+    )
+    if reading is None:
+        return None
+    liquidity = reading.liquidity_usd
+    # Unknown liquidity is UNKNOWN, not a safe/adequate liquidity pool.
+    if liquidity is None or liquidity < cfg.radar_min_liquidity_usd:
+        return None
+    if reading.volume_5m_usd > liquidity * cfg.radar_max_volume_liquidity_ratio:
+        return None
+    # Skip coins already vertically pumping: poor scalping entry / chase risk.
+    if not 6 <= reading.change_5m_pct <= cfg.radar_max_change_5m_pct:
+        return None
+    return reading
+
+
+def confirm_progress(reading: Signal, previous: dict, *, min_mc_rise: float,
+                     min_extra_buys: int, min_extra_volume: float) -> tuple[float, int] | None:
+    """Two distinct snapshots must show fresh buy activity AND rising MC.
+
+    A DexScreener 5m count is rolling, not unique buyers or a trade stream.
+    Rising counts are only an approximation of continued buying.
+    """
+    if not previous or not previous.get('qualified') or not previous.get('mc'):
+        return None
+    mc_change = (reading.market_cap_usd / previous['mc'] - 1) * 100
+    new_buys = reading.buys_5m - previous['buys']
+    new_sells = reading.sells_5m - previous['sells']
+    additional_volume = reading.volume_5m_usd - previous['volume']
+    if (not min_mc_rise <= mc_change <= 18 or
+            new_buys < min_extra_buys or
+            additional_volume < min_extra_volume or
+            new_sells > max(2, new_buys // 2)):
+        return None
+    return mc_change, new_buys
+
+
+def rank(reading: Signal, mc_rise: float, new_buys: int) -> float:
+    """Order confirmed candidates by freshness and activity, not database age."""
+    ratio = reading.buys_5m / max(1, reading.sells_5m)
+    return (min(mc_rise, 12) * 2 + min(new_buys, 30) * 1.5 +
+            min(ratio, 5) * 4 + min(reading.volume_5m_usd / 3000, 12))

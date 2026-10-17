@@ -15,7 +15,7 @@ from solter.storage import Store
 
 def main():
     parser = argparse.ArgumentParser(description=f'Solter v{__version__}: free early memecoin caller')
-    parser.add_argument('command', choices=('run', 'doctor', 'stats', 'test', 'report', 'probe'))
+    parser.add_argument('command', choices=('run', 'doctor', 'stats', 'test', 'report', 'probe', 'shortlist'))
     parser.add_argument('--days', type=int, default=7, help='report: days to include')
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
@@ -28,6 +28,11 @@ def main():
     try:
         if args.command == 'stats':
             print(json.dumps(store.stats(), indent=2))
+        elif args.command == 'shortlist':
+            rows = store._rows('''SELECT h.mint,t.symbol,h.reason,h.score,ROUND(?-h.at,1) AS age_seconds
+                FROM radar_health h LEFT JOIN tokens t USING(mint) WHERE h.at>?
+                ORDER BY h.score DESC,h.at DESC LIMIT 20''',(time.time(),time.time()-600))
+            print(json.dumps(rows,indent=2,ensure_ascii=False))
         elif args.command == 'report':
             from solter.report import build, render
             print(render(build(store, time.time(), max(1, args.days))))

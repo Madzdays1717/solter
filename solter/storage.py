@@ -57,6 +57,10 @@ CREATE TABLE IF NOT EXISTS radar_alerts (
   mint TEXT PRIMARY KEY, at REAL NOT NULL, state TEXT NOT NULL,
   market_cap_usd REAL NOT NULL, volume_5m_usd REAL NOT NULL);
 CREATE INDEX IF NOT EXISTS radar_alerts_at ON radar_alerts(at);
+CREATE TABLE IF NOT EXISTS radar_samples (
+ mint TEXT PRIMARY KEY, at REAL NOT NULL, qualified INTEGER NOT NULL,
+ mc REAL, volume REAL, buys INTEGER, sells INTEGER
+);
 CREATE TABLE IF NOT EXISTS metrics (key TEXT PRIMARY KEY, n INTEGER NOT NULL DEFAULT 0);
 '''
 
@@ -76,6 +80,13 @@ class Store:
         for name in ('radar_seen_at', 'radar_mc_usd', 'radar_volume_5m_usd'):
             if name not in existing:
                 self.db.execute(f'ALTER TABLE tokens ADD COLUMN {name} REAL')
+        self.db.commit()
+        sample_columns = {r['name'] for r in self.db.execute('PRAGMA table_info(radar_samples)')}
+        for name, kind in (('pool', 'TEXT'), ('price', 'REAL'), ('liquidity', 'REAL'), ('basis', 'TEXT')):
+            if name not in sample_columns:
+                self.db.execute(f'ALTER TABLE radar_samples ADD COLUMN {name} {kind}')
+        self.db.execute("""CREATE TABLE IF NOT EXISTS radar_health (
+            mint TEXT PRIMARY KEY, at REAL NOT NULL, reason TEXT NOT NULL, score REAL DEFAULT 0)""")
         self.db.commit()
         self.columns = {r['name'] for r in self.db.execute('PRAGMA table_info(tokens)')}
         self.outcome_columns = {r['name'] for r in self.db.execute('PRAGMA table_info(outcomes)')}
@@ -166,13 +177,36 @@ class Store:
         return batch
 
     def radar_batch(self, now: float, limit: int, minutes: int) -> list[dict]:
-        """Fair round robin; independent of Solana log subscription slots."""
-        return self._rows("""SELECT * FROM tokens
-            WHERE state IN ('fresh', 'alive', 'watching', 'dead')
-            AND COALESCE(migrated_at, created_at) >= ?
-            AND mint NOT IN (SELECT mint FROM radar_alerts)
-            ORDER BY COALESCE(radar_seen_at, 0) ASC, created_at DESC LIMIT ?""",
-                          (now - minutes * 60, limit))
+        """Reserve at most one third for confirmation; the rest fairly rotates discovery."""
+        condition = """t.state IN ('fresh','alive','watching','dead')
+            AND COALESCE(t.migrated_at,t.created_at)>=?
+            AND t.mint NOT IN (SELECT mint FROM radar_alerts)
+            AND t.mint NOT IN (SELECT mint FROM calls)"""
+        hot = self._rows("SELECT t.* FROM tokens t JOIN radar_samples s ON s.mint=t.mint WHERE "
+                        + condition + " AND s.qualified=1 AND s.at>=? ORDER BY t.radar_seen_at LIMIT ?",
+                        (now-minutes*60, now-120, max(1,limit//3)))
+        broad = self._rows("SELECT t.* FROM tokens t WHERE " + condition +
+                           " ORDER BY COALESCE(t.radar_seen_at,0),t.created_at DESC LIMIT ?",
+                           (now-minutes*60, limit))
+        result, seen = [], set()
+        for row in hot + broad:
+            if row['mint'] not in seen and len(result)<limit:
+                result.append(row)
+                seen.add(row['mint'])
+        return result
+
+    def radar_status(self, mint, at, reason, score=0):
+        self.db.execute("""INSERT INTO radar_health VALUES(?,?,?,?) ON CONFLICT(mint)
+            DO UPDATE SET at=excluded.at,reason=excluded.reason,score=excluded.score""",
+            (mint, at, reason, score))
+        self.db.commit()
+
+    def radar_capacity(self, now, limit, gap):
+        if self.db.execute('SELECT COUNT(*) FROM radar_alerts WHERE at>?', (now-3600,)).fetchone()[0]>=limit:
+            return 'hourly alert limit'
+        if gap and self.db.execute('SELECT 1 FROM radar_alerts WHERE at>? LIMIT 1',(now-gap,)).fetchone():
+            return 'alert cooldown'
+        return None
 
     def radar_mark(self, mint: str, at: float, mc: float | None, volume: float | None):
         self.db.execute("""UPDATE tokens SET radar_seen_at=?,
@@ -181,11 +215,33 @@ class Store:
             WHERE mint=?""", (at, mc, volume, mint))
         self.db.commit()
 
-    def radar_claim(self, mint: str, now: float, limit: int, mc: float, volume: float) -> bool:
+    def radar_sample(self, mint: str, now: float, reading, seconds: int) -> dict | None:
+        """Return previous spaced observation; do not move baseline every 4s."""
+        row = self.db.execute('SELECT * FROM radar_samples WHERE mint=?', (mint,)).fetchone()
+        if row and now - row['at'] < seconds:
+            return None
+        previous = dict(row) if row and 0 <= now - row['at'] <= 120 else None
+        self.db.execute('''INSERT INTO radar_samples(mint,at,qualified,mc,volume,buys,sells)
+            VALUES(?,?,?,?,?,?,?) ON CONFLICT(mint) DO UPDATE SET
+            at=excluded.at, qualified=excluded.qualified, mc=excluded.mc,
+            volume=excluded.volume, buys=excluded.buys, sells=excluded.sells''',
+            (mint, now, int(reading is not None),
+             reading.market_cap_usd if reading else None,
+             reading.volume_5m_usd if reading else None,
+             reading.buys_5m if reading else None,
+             reading.sells_5m if reading else None))
+        self.db.commit()
+        return previous
+
+    def radar_claim(self, mint: str, now: float, limit: int, mc: float, volume: float,
+                    min_gap: int = 0) -> bool:
         """Persist deduplication BEFORE send, even if Telegram times out."""
         count = self.db.execute('SELECT COUNT(*) FROM radar_alerts WHERE at>?',
                                 (now - 3600,)).fetchone()[0]
         if count >= limit:
+            return False
+        if min_gap and self.db.execute('SELECT 1 FROM radar_alerts WHERE at>? LIMIT 1',
+                                       (now - min_gap,)).fetchone():
             return False
         cur = self.db.execute("""INSERT OR IGNORE INTO radar_alerts
             (mint, at, state, market_cap_usd, volume_5m_usd)
@@ -351,6 +407,8 @@ class Store:
         return sum(self.budget_by_kind().values())
 
     def cleanup(self, now: float):
+        self.db.execute('DELETE FROM radar_health WHERE at<?', (now - 86400,))
+        self.db.execute('DELETE FROM radar_samples WHERE at<?', (now - 2 * 86400,))
         self.db.execute('DELETE FROM trades WHERE at<?', (now - 2 * 86400,))
         self.db.execute('DELETE FROM processed WHERE at<?', (now - 86400,))
         self.db.execute("DELETE FROM tokens WHERE state IN ('dead','expired') AND created_at<?",

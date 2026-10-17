@@ -1,18 +1,32 @@
-# Solter v2.1.0 · Radar Volume + MC Aktif
+# v2.1.2
 
-**Baru:** radar momentum independen yang memeriksa hingga 30 token per request DexScreener.
-Radar melihat volume 5 menit, jumlah buy/sell, dan MC bergerak, **tanpa slot live wallet/logs**.
-Notifikasi `📡 SOLTER RADAR` bersifat dini dan *belum terverifikasi keamanannya*;
-`⚡ SOLTER CALL` adalah hasil pemeriksaan on-chain yang lebih ketat dan tetap dibatasi.
+Panduan terbaru: [UPGRADE-v2.1.2.md](UPGRADE-v2.1.2.md). Validasi versi ini terbatas pemeriksaan sintaks; bukan hasil backtest atau benchmark live.
 
-Lihat [panduan upgrade 2.1.0](UPGRADE-v2.1.0.md) untuk Termux dan pengaturan `.env`.
+# Solter v2.1.1 · Radar Selektif / Anti-Spam
+
+**Perubahan utama:** radar tidak lagi mengirim notifikasi dari satu snapshot.
+Dua sampel berkualitas harus menunjukkan MC naik, volume bertambah, dan
+transaksi beli baru bertambah dengan tekanan jual rendah, minimal 15 detik
+terpisah. Likuiditas harus diketahui dan memadai. Kandidat diurutkan berdasarkan
+momentum, hanya yang teratas diberi alert, maksimal 4/jam dengan jeda 10 menit.
+Ini mengurangi spam **tetapi dapat melewatkan pump sangat cepat**.
+
+Jalur `⚡ SOLTER CALL` kini minimal grade B (60/100), termasuk ketika `.env`
+versi lama masih mengisi `MIN_SCORE=0`. Balasan milestone dimatikan secara default,
+namun peringatan dev jual dipertahankan.
+
+**Penting:** DexScreener `txns.m5` adalah jumlah transaksi, **bukan jumlah wallet unik**.
+Volume tinggi juga dapat dimanipulasi (wash trading). Sinyal radar tetap belum
+menjamin keamanan kontrak ataupun profit. Tidak ada pengujian live Termux pada rilis ini.
+
+Panduan pemasangan: [UPGRADE-v2.1.1.md](UPGRADE-v2.1.1.md).
 
 # Solter v2: caller memecoin awal, 100% sumber gratis
 
 Solter menerima launch yang terlihat melalui stream Pump.fun, memantau volume/MC via radar, memilih aliran SOL yang aktif, membaca
 trade-nya langsung dari log Solana, lalu mengirim **satu** call Telegram hanya jika aliran beli
 nyata (dalam SOL), distribusi holder, dev, creator, dan kontraknya lolos. Setiap call dilacak
-60 menit (2x/3x/5x/10x, dev jual) supaya kualitas filter bisa dibuktikan dan disetel.
+60 menit (hasil tetap dilacak; peringatan dev jual aktif) supaya kualitas filter bisa dibuktikan dan disetel.
 
 - **Gratis**: PumpPortal (launch & migrasi), RPC Solana publik/free tier, DexScreener, metadata IPFS.
   Tanpa langganan, tanpa API key wajib.
@@ -137,8 +151,8 @@ kuota kredit, sesuaikan `RPC_REQUESTS_PER_DAY` dengan biaya kredit per metode di
 
 ## Menyetel filter
 
-Semua ambang ada di `.env.example` dengan penjelasan. Default `MIN_SCORE=0`: setiap token yang
-lolos semua filter di-call dengan grade A/B/C di pesannya, supaya `report` punya data per grade.
+Semua ambang ada di `.env.example` dengan penjelasan. Default `CALL_MIN_QUALITY_SCORE=60`: hanya token grade B/A yang
+lolos pemeriksaan on-chain dan skor kualitas akan dikirim sebagai CALL. Grade C tidak dikirim.
 Cara yang disarankan:
 
 1. Jalankan 24-72 jam dengan default.

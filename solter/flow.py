@@ -69,7 +69,11 @@ def evaluate(trades: list[Trade], now: float, rules: Rules = Rules(),
     sell_sol = sum(t.sol or 0 for t in sells)
     buyers = {t.wallet for t in buys}
     recent = {t.wallet for t in buys if now - t.at <= rules.recent}
-    burst = max((sum(1 for u in buys if 0 <= u.at - t.at <= 20) for t in buys), default=0)
+    left = burst = 0
+    for right, trade in enumerate(buys):
+        while trade.at - buys[left].at > 20:
+            left += 1
+        burst = max(burst, right - left + 1)
     per_wallet = Counter()
     for t in buys:
         per_wallet[t.wallet] += t.sol

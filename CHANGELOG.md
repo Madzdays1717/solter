@@ -1,3 +1,18 @@
+# v2.1.2
+
+Kontinuitas pool/basis valuasi, batas usia sampel, konfirmasi harga/likuiditas, recheck sebelum kirim, shortlist diagnostik, batch paralel terbatas, pacing RPC, dan 50 slot. Lihat UPGRADE-v2.1.2.md.
+
+# v2.1.1 — radar selektif / anti spam
+
+- Menghapus alert satu-snapshot; dua pembacaan berkualitas dengan MC naik, buy dan volume baru bertambah wajib.
+- Gerbang likuiditas, tekanan jual, MC, harga 5 menit untuk mengurangi koin berisiko/terlambat, bukan jaminan anti rugpull.
+- Memprioritaskan kandidat teratas; cap 4 radar/jam, cooldown global 600 detik dan dedup persisten.
+- CALL kini grade B/A saja (minimal 60/100); milestone spam off default, peringatan dev jual tetap ada.
+- Migrasi SQLite otomatis `radar_samples`; aman untuk database lama.
+- 89 unit test lokal berhasil, tanpa pengujian live pada jaringan.
+
+---
+
 # v2.0.2
 
 Evaluasi paralel terbatas, cache kegagalan sementara 10 detik, prefetch kandidat aktif, pemeriksaan momentum ulang setelah RPC, retry/fallback HTTP opsional, log penolakan/durasi, default 16 slot dan quiet rotation 60 detik. Lihat UPGRADE-v2.0.2.md.

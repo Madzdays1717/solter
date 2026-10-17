@@ -25,7 +25,7 @@ from .config import Config
 from .events import (Trade, cpi_payloads, decode_amm_trade, decode_pump_trade, log_payloads,
                      trades_from_logs, trades_from_tx)
 from .flow import Flow, evaluate
-from .momentum import number, pick_pairs, signal
+from .momentum import (number, pick_pairs, selective_signal, confirm_progress, rank)
 from .quality import Assessment, holder_stats, quality_reason, score, socials_from
 from .reservoir import candidates, classify, dev_buy_pct
 from .rpc import BACKFILL, DECISION, FALLBACK, QUOTAS, SWEEP, BoundedRPC, NoBudget
@@ -77,11 +77,13 @@ class Solter:
         self.clock_warned = 0.0
         self.eval_jobs = {}
         self.prefetched = set()
+        self.flow_wakeup = asyncio.Event()
 
     def attach(self, session):
         self.session = session
         self.rpc = BoundedRPC(self.cfg.rpc_http, self.db, self.cfg.rpc_per_minute,
-                              self.cfg.rpc_per_day, session, self.cfg.rpc_fallback)
+                              self.cfg.rpc_per_day, session, self.cfg.rpc_fallback,
+                              rps=self.cfg.rpc_rps, method_rps=self.cfg.rpc_method_rps)
         self.tg = Telegram(self.cfg.tg_token, self.cfg.tg_chat, session)
 
     # discovery -----------------------------------------------------------
@@ -339,6 +341,7 @@ class Solter:
 
     def ingest(self, mint: str, signature: str, trades: list[Trade]):
         now = time.time()
+        self.flow_wakeup.set()
         self.db.mark(mint, signature, now)
         token = self.db.token(mint)
         if not token:
@@ -491,71 +494,40 @@ class Solter:
         return facts
 
     async def radar_once(self, now: float) -> int:
-        """Fast, batch radar. A missing DEX pair does not block the RPC/curve path.
+        from .radar import run_once
+        return await run_once(self)
 
-        DexScreener's documented /tokens/v1 endpoint accepts up to 30 token addresses.
-        Radar uses no per-wallet checks and no Solana logsSubscribe slot.
-        """
-        tokens = self.db.radar_batch(now, self.cfg.radar_batch, self.cfg.radar_minutes)
-        delivered = 0
-        for offset in range(0, len(tokens), 30):
-            chunk = tokens[offset:offset + 30]
-            wanted = {t['mint'] for t in chunk}
-            payload = await self.dex('/tokens/v1/solana/' + ','.join(t['mint'] for t in chunk))
-            if not isinstance(payload, list):
-                self.db.metric('radar_http_unavailable')
-                # Rotate even on a failed request; otherwise the same 30 tokens starve all others.
-                for t in chunk:
-                    self.db.radar_mark(t['mint'], time.time(), None, None)
-                continue
-            pairs = pick_pairs(payload, wanted)
-            for token in chunk:
-                mint = token['mint']
-                pair = pairs.get(mint)
-                mc = (number(pair.get('marketCap')) or number(pair.get('fdv'))) if pair else None
-                volume = number((pair.get('volume') or {}).get('m5')) if pair else None
-                previous = {'market_cap_usd': token['radar_mc_usd']} if token['radar_mc_usd'] else None
-                # Compare against the previous *successful* observation before updating the DB.
-                candidate = signal(pair, previous,
-                                   min_mc=self.cfg.radar_min_mc_usd,
-                                   max_mc=self.cfg.radar_max_mc_usd,
-                                   min_volume=self.cfg.radar_min_volume_5m_usd,
-                                   min_buys=self.cfg.radar_min_buys_5m,
-                                   min_buy_ratio=self.cfg.radar_min_buy_ratio,
-                                   min_change_pct=self.cfg.radar_min_mc_change_pct) if pair else None
-                self.db.radar_mark(mint, time.time(), mc, volume)
-                if candidate and await self.send_radar(token, candidate, time.time()):
-                    delivered += 1
-                elif not pair:
-                    self.db.metric('radar_pair_not_listed')
-        return delivered
-
-    async def send_radar(self, token, reading, now: float) -> bool:
-        """Preliminary, non-verified momentum notice with independent hourly ceiling."""
+    async def send_radar(self, token, reading, now: float, mc_rise: float = 0,
+                         new_buys: int = 0) -> bool:
+        """No duplicates, conservative hourly ceiling and global quiet interval."""
         mint = token['mint']
-        if not self.db.radar_claim(mint, now, self.cfg.radar_max_alerts_per_hour,
-                                   reading.market_cap_usd, reading.volume_5m_usd):
+        hour_limit = min(self.cfg.radar_max_alerts_per_hour,
+                         self.cfg.radar_quality_max_alerts_per_hour)
+        if self.db.has_call(mint):
+            return False
+        if not self.db.radar_claim(mint, now, hour_limit, reading.market_cap_usd,
+                                   reading.volume_5m_usd, self.cfg.radar_alert_gap_seconds):
             return False
         import html
         title = html.escape((token.get('symbol') or 'TOKEN')[:32])
-        delta = (f'{reading.observed_mc_change_pct:+.1f}% sejak sampel sebelumnya'
-                 if reading.observed_mc_change_pct is not None else 'belum ada sampel pembanding')
-        mc_label = 'FDV (estimasi MC)' if reading.mc_is_fdv else 'MC'
-        liquidity = (f' · Likuiditas ${reading.liquidity_usd:,.0f}'
-                     if reading.liquidity_usd is not None else '')
-        msg = (f'📡 <b>SOLTER RADAR · MOMENTUM AWAL</b>\n'
+        mc_label = 'FDV (perkiraan)' if reading.mc_is_fdv else 'MC'
+        msg = (f'🎯 <b>SOLTER · KANDIDAT MOMENTUM TERKONFIRMASI</b>\n'
                f'<b>{title}</b> · {html.escape(token.get("stage") or "new")}\n'
-               f'💰 {mc_label} <b>${reading.market_cap_usd:,.0f}</b> · {delta}\n'
-               f'📊 Volume 5m <b>${reading.volume_5m_usd:,.0f}</b>\n'
-               f'🟢 Buy/Sell 5m <b>{reading.buys_5m}/{reading.sells_5m}</b>{liquidity} '
+               f'💰 {mc_label} <b>${reading.market_cap_usd:,.0f}</b> '
+               f'· naik {mc_rise:+.1f}% antar sampel\n'
+               f'📊 Volume 5m <b>${reading.volume_5m_usd:,.0f}</b> '
+               f'· perubahan hitungan buy-5m +{new_buys}\n'
+               f'🟢 Buy/Sell 5m <b>{reading.buys_5m}/{reading.sells_5m}</b> '
+               f'· Likuiditas ${reading.liquidity_usd:,.0f} '
                f'· harga 5m {reading.change_5m_pct:+.1f}%\n'
                f'<code>{html.escape(mint)}</code>\n\n'
-               '<i>Radar cepat, BUKAN hasil audit keamanan atau jaminan naik. '
-               'Periksa likuiditas, mint, holder, dan risiko rugpull sebelum trading.</i>')
+               '<i>Tersaring dari sampel pool yang sama dan diperiksa ulang sebelum kirim; bukan audit holder atau jaminan naik. '
+               'Jumlah transaksi beli tidak sama dengan pembeli unik. '
+               'Verifikasi risiko mint, wallet, dan dev sebelum entry.</i>')
         state, _ = await self.tg.call(msg, mint, None)
         self.db.radar_finish(mint, state)
         self.db.metric('radar_alert_' + state)
-        LOG.info('RADAR %s %s mc=$%.0f vol5=$%.0f state=%s',
+        LOG.info('QUALITY RADAR %s %s mc=$%.0f vol5=$%.0f state=%s',
                  token.get('stage'), mint[:12], reading.market_cap_usd,
                  reading.volume_5m_usd, state)
         return state == 'sent'
@@ -601,6 +573,7 @@ class Solter:
         last = {}
         try:
             while self.running:
+                self.flow_wakeup.clear()
                 for mint, job in list(self.eval_jobs.items()):
                     if job.done():
                         job.result()
@@ -617,7 +590,11 @@ class Solter:
                         continue
                     last[mint] = time.monotonic()
                     self.eval_jobs[mint] = asyncio.create_task(self.evaluate_one(token))
-                await asyncio.sleep(.5)
+                try:
+                    await asyncio.wait_for(self.flow_wakeup.wait(), timeout=.5)
+                except asyncio.TimeoutError:
+                    pass
+                await asyncio.sleep(.05)
         finally:
             for job in self.eval_jobs.values():
                 job.cancel()
@@ -669,7 +646,7 @@ class Solter:
             return
         assessment = replace(assessment, score=score(flow, assessment.holders,
                                                      assessment.socials, assessment.launches))
-        if assessment.score < self.quality.min_score:
+        if assessment.score < max(self.quality.min_score, self.cfg.call_quality_score_floor):
             self.note(mint, 'low score')
             return
         await self.send_call(token, flow, assessment, now)
@@ -831,7 +808,7 @@ class Solter:
         reached = max((m for m in MILESTONES if multiple >= m), default=0)
         if reached > o['milestone']:
             updates['milestone'] = reached
-            if self.cfg.followups and o['message_id']:
+            if self.cfg.followups and self.cfg.followup_milestones and o['message_id']:
                 await self.tg.reply(milestone_text(o['symbol'], multiple, o['peak'] * PUMP_SUPPLY,
                                                    self.sol_usd, elapsed), o['message_id'])
         if o['dev_sold'] and not o['dev_alerted']:
