@@ -25,7 +25,7 @@
 | `scheduler` | Akhiri watch (waktu habis, sepi 90 dtk, cooldown 5 mnt), isi slot dari kandidat (maks ⅓ slot untuk migrasi) | 0 |
 | `logs` | Satu WebSocket Solana, `logsSubscribe` per akun yang dipantau atau dilacak; trade di-decode dari log | 0 |
 | `transactions` | `getTransaction` hanya bila log menunjukkan Buy/Sell tanpa event yang terbaca (atau log terpotong) | jatah 15% |
-| `backfill` | Saat token mulai dipantau / setelah putus: `getSignaturesForAddress` (`until` = signature terakhir) + transaksi dalam jendela | jatah 15% |
+| `backfill` | Saat token mulai dipantau / setelah putus: `getSignaturesForAddress` tanpa cursor + pilih signature terbaru belum diproses (maks. `BACKFILL_TX` transaksi) dalam jendela | jatah 15% |
 | `sol_price` | Harga SOL/USD dari DexScreener tiap 60 dtk | gratis |
 | `evaluator` | Tiap 4 dtk: gerbang flow → cek mendalam (cache 45 dtk lolos / 120 dtk gagal) → skor → call | jatah 25%, 4 request per cek |
 | `tracker` | Return 5/15/30/60 mnt, puncak/low, balasan 2x/3x/5x/10x, peringatan dev jual | hampir 0 |

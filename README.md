@@ -1,4 +1,4 @@
-# Solter v2.2.0: scanner scalping momentum Solana (sumber publik/gratis)
+# Solter v2.2.1: scanner scalping momentum Solana (sumber publik/gratis)
 
 Solter menggabungkan **launch baru, migrasi, dan token PumpSwap yang sudah lama tetapi
 mulai ramai lagi**. Kandidat diurutkan berdasarkan momentum dan dipantau menggunakan log
@@ -15,6 +15,19 @@ pemeriksaan kontrak. Setiap call dilacak
 - **Tidak bisa menjamin semua token tertangkap atau profit.** API publik memerlukan waktu indeks,
   koneksi putus bisa menghilangkan event, dan volume bisa direkayasa. Baca [docs/ANALISIS.md](docs/ANALISIS.md) untuk alasan setiap
   filter dan batasannya.
+
+## Perbaikan v2.2.1: RPC -32020
+
+Jika log memperlihatkan `getSignaturesForAddress error -32020: Transaction not found`,
+node RPC tidak menemukan signature `until` yang pernah disimpan oleh bot.
+Pembaruan ini **menghapus cursor tersebut dari backfill**, memilih transaksi
+terbaru yang belum dibaca, dan menjaga urutan harga. Cadangan recovery pada
+RPC menghapus cursor tak valid bila terjadi `-32020` dalam pemanggilan lain.
+Tidak perlu membuang database lama; lihat `UPGRADE-TERMUX.md` untuk langkah
+pembaruan dari v2.2.0. Angka `WATCH ... initial traction 0.00` **bukan bukti
+volume token nol**; untuk pool migrasi dengan snapshot DEX kini log menunjukkan
+jumlah buy/sell dan volume 5 menit. Itu hanya metrik discovery, bukan bukti
+keuntungan atau sinyal call on-chain.
 
 ## Perubahan penting v2.2.0 — mode momentum-first
 

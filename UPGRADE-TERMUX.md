@@ -1,8 +1,27 @@
-# Upgrade Solter v2.1.0 → v2.2.0 (Termux)
+# Upgrade Solter v2.1.0/v2.2.0 → v2.2.1 (Termux)
 
 1. Stop the old bot (`Ctrl+C` inside its tmux session). Never run two bot processes against one SQLite database.
 2. Backup `.env` and `data/` (especially `data/solter-v2.sqlite3`). Do not post or commit Telegram or RPC keys.
-3. Extract this archive and replace only the source, scripts, README, `.env.example`, and tests in the existing project. Keep your existing `.env` and `data/` folder.
+3. Extract the ZIP and replace the **source** files in the existing project. Keep your existing `.env` and `data/` folder. For an existing v2.2.0 installation, only three files are needed: `solter/rpc.py`, `solter/engine.py`, and `solter/__init__.py`.
+
+   Example if the ZIP was downloaded to Termux storage and your project is `~/solter-v2`:
+
+   ```sh
+   pkg install unzip -y
+   termux-setup-storage    # one-time permission; skip if already granted
+   mkdir -p ~/solter-upgrade
+   unzip -oq ~/storage/downloads/solter-v2.2.1-rpcfix.zip -d ~/solter-upgrade
+   cd ~/solter-v2       # replace this path with your actual Solter project path
+   cp ~/solter-upgrade/solter-v2/solter/rpc.py solter/rpc.py
+   cp ~/solter-upgrade/solter-v2/solter/engine.py solter/engine.py
+   cp ~/solter-upgrade/solter-v2/solter/__init__.py solter/__init__.py
+   python -m unittest discover -s tests
+   python bot.py doctor
+   ```
+
+   Tests inside an older project may not include the new cases; new regression tests
+   are included in the ZIP. The source change does not require a database reset.
+
 4. Update your existing `.env` values to use the new defaults, at minimum:
 
    ```dotenv

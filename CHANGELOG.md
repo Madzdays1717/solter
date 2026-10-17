@@ -1,3 +1,19 @@
+## v2.2.1 — Agave RPC cursor fix (2026-10-18)
+
+- **Fix RPC `getSignaturesForAddress -32020`**: stop using the saved last trade
+  signature as an `until` cursor for backfill; it may belong to an old bonding
+  curve or previous pool, or the current provider may not retain it.
+- Backfill starts from the most recent signatures, deduplicates with SQLite,
+  selects up to `BACKFILL_TX` most recent unprocessed and timely transactions,
+  and ingests oldest-to-newest so the latest price is preserved. Signature list
+  reads are bounded at 100, fetched transactions still obey the configured limit.
+- General-purpose RPC client gracefully retries once without invalid
+  `before`/`until` on `-32020`, while accounting for both RPC requests.
+- Migrated-token WATCH logs display the 5-minute DEX volume and buy/sell counts
+  as preliminary activity, not the uninitialized on-chain SOL inflow.
+- Added regression tests; this is a local code-level fix, not a guarantee of
+  RPC live availability or profitable token alerts.
+
 ## v2.2.0 — momentum-first scanner (2026-10-18)
 
 - GeckoTerminal 5m trending/new-pool discovery, DexScreener profile/boost discovery-only,

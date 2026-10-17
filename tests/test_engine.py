@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import aiohttp
 
-from helpers import CREATOR, MINT, account, addr, amm_event, curve_bytes, logs, pool_account, pump_event
+from helpers import CREATOR, MINT, account, addr, amm_event, cpi_tx, curve_bytes, logs, pool_account, pump_event
 from solter.chain import PUMP_AMM, TOKEN_PROGRAM, associated_account, bonding_curve, migration_pool
 from solter.config import Config
 from solter.engine import Solter
@@ -204,6 +204,42 @@ class EngineTests(unittest.TestCase):
         asyncio.run(self.bot.follow(self.db.open_outcomes()[0], outcome['call_at'] + 61 * 60))
         self.assertEqual(self.db.outcome(MINT)['done'], 1)
         self.assertEqual(self.db.subscriptions(), [])
+
+    def test_backfill_avoids_stale_cursor_and_keeps_latest_prices(self):
+        self.watched()
+        # The saved signature can refer to a different market/account after migration.
+        self.db.update(MINT, last_sig='obsolete-cursor')
+        self.db.mark(MINT, 'already-seen')
+        now = int(time.time())
+        signatures = ([{'signature': 'already-seen', 'blockTime': now, 'err': None},
+                       {'signature': 'failed', 'blockTime': now, 'err': {'oops': True}},
+                       {'signature': 'very-old', 'blockTime': now - 600, 'err': None}]
+                      + [{'signature': f'new{i}', 'blockTime': now - i, 'err': None}
+                         for i in range(4)])
+        prices = {'new0': 43, 'new1': 42, 'new2': 41}
+
+        def history(params):
+            self.assertEqual(params[0], CURVE)
+            self.assertNotIn('until', params[1])
+            self.assertNotIn('before', params[1])
+            self.assertGreaterEqual(params[1]['limit'], 12)
+            return signatures
+
+        def transaction(params):
+            sig = params[0]
+            i = int(sig[-1])
+            return cpi_tx([pump_event(addr(sig), 1.0, ts=now - i,
+                        vsol=int(prices[sig] * 1e9), vtok=int(850e12))])
+
+        self.bot.rpc = FakeRPC({'getSignaturesForAddress': history,
+                                'getTransaction': transaction})
+        asyncio.run(self.bot.backfill_one(MINT))
+        requested = [args[0] for method, args, _ in self.bot.rpc.calls
+                     if method == 'getTransaction']
+        self.assertEqual(requested, ['new2', 'new1', 'new0'])
+        self.assertEqual(len(self.db.trades(MINT)), 3)
+        self.assertFalse(self.db.seen(MINT, 'new3'))
+        self.assertEqual(self.db.token(MINT)['last_sig'], 'new0')
 
     def test_migration_points_to_the_derived_pool(self):
         self.launch()

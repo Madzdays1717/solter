@@ -86,7 +86,23 @@ class BoundedRPC:
                     if not isinstance(body, dict):
                         return None
                     if body.get('error'):
-                        LOG.warning('RPC %s error %s', method, str(body['error'])[:160])
+                        error = body['error']
+                        # Agave 4.x returns -32020 when a pagination signature
+                        # no longer exists on this RPC node. Retry with a fresh
+                        # head query, letting the caller deduplicate signatures.
+                        # This is intentionally only for this method/error: never
+                        # hide arbitrary RPC errors or bypass the request ceiling.
+                        cursor = (method == 'getSignaturesForAddress' and len(params) >= 2
+                                  and isinstance(params[1], dict)
+                                  and ('before' in params[1] or 'until' in params[1]))
+                        if (cursor and isinstance(error, dict) and error.get('code') == -32020
+                                and attempt == 0):
+                            params = [params[0], {k: v for k, v in params[1].items()
+                                                  if k not in ('before', 'until')}]
+                            self.store.metric('rpc_cursor_recovered')
+                            LOG.info('RPC signature cursor missing; retrying latest signatures')
+                            continue
+                        LOG.warning('RPC %s error %s', method, str(error)[:160])
                         return None
                     self.failures = 0
                     return body.get('result')

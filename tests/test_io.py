@@ -87,6 +87,38 @@ class RPCTests(StoreCase):
         rpc = BoundedRPC('https://rpc', self.db, 100, 10, session)
         self.assertIsNone(asyncio.run(rpc.call('getTransaction', ['s'])))
 
+    def test_agave_cursor_error_recovers_without_leaking_signature(self):
+        class ChangingSession(FakeSession):
+            def __init__(self):
+                super().__init__()
+                self.responses = [FakeResponse(body={'error': {
+                    'code': -32020, 'message': 'Transaction not found'}}),
+                    FakeResponse(body={'result': [{'signature': 'recent'}]})]
+
+            def post(self, url, **kwargs):
+                self.attempts += 1
+                self.posts.append((url, kwargs))
+                return self.responses.pop(0)
+
+        session = ChangingSession()
+        rpc = BoundedRPC('https://rpc', self.db, 100, 10, session)
+        result = asyncio.run(rpc.call('getSignaturesForAddress',
+                          ['pool', {'limit': 10, 'until': 'old-cursor'}], kind='backfill'))
+        self.assertEqual(result, [{'signature': 'recent'}])
+        self.assertEqual(session.attempts, 2)
+        self.assertEqual(session.posts[0][1]['json']['params'][1]['until'], 'old-cursor')
+        self.assertEqual(session.posts[1][1]['json']['params'][1], {'limit': 10})
+        self.assertEqual(self.db.budget_used(), 2)
+        self.assertEqual(self.db.metrics()['rpc_cursor_recovered'], 1)
+
+    def test_agave_error_without_cursor_is_not_retried(self):
+        session = FakeSession(FakeResponse(body={'error': {
+            'code': -32020, 'message': 'Transaction not found'}}))
+        rpc = BoundedRPC('https://rpc', self.db, 100, 10, session)
+        self.assertIsNone(asyncio.run(rpc.call('getSignaturesForAddress',
+                          ['pool', {'limit': 10}], kind='backfill')))
+        self.assertEqual(session.attempts, 1)
+
 
 class TelegramTests(unittest.TestCase):
     def run_call(self, results, image='https://ipfs.io/ipfs/Qm'):

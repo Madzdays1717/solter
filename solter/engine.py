@@ -233,8 +233,16 @@ class Solter:
             if self.db.promote(t['mint'], now, self.cfg.watch_seconds):
                 free -= 1
                 self.db.metric('promoted')
-                LOG.info('WATCH %s %s inflow %.2f SOL/min stage=%s', t['mint'][:12],
-                         (t['symbol'] or '')[:16], t['traction'] or 0, t['stage'])
+                if t['stage'] == 'migrated' and t.get('market_at'):
+                    LOG.info('WATCH %s %s stage=migrated · DEX 5m: %d buy/%d sell, '
+                             '$%.0f volume · awaiting verified on-chain trades',
+                             t['mint'][:12], (t['symbol'] or '')[:16],
+                             t.get('market_buys') or 0, t.get('market_sells') or 0,
+                             t.get('market_volume_usd') or 0)
+                else:
+                    LOG.info('WATCH %s %s initial traction %.2f SOL/min stage=%s',
+                             t['mint'][:12], (t['symbol'] or '')[:16],
+                             t['traction'] or 0, t['stage'])
                 self.request_backfill(t['mint'])
 
     # Solana logs ---------------------------------------------------------
@@ -445,19 +453,35 @@ class Solter:
         token = self.db.token(mint)
         if not token or token['state'] != 'watching' or not token['account']:
             return
-        options = {'limit': self.cfg.backfill_tx, 'commitment': 'confirmed'}
-        if token['last_sig']:
-            options['until'] = token['last_sig']
+        # Do not use last_sig as an `until` cursor: it belongs to the mint,
+        # not necessarily to the currently watched account. Migrations and
+        # provider pruning can make it unknown to getSignaturesForAddress,
+        # which is RPC error -32020 on Agave 4.x. The processed table already
+        # provides reliable deduplication without a pagination cursor.
+        # Fetch more *signatures* than transactions: most may be seen/failed/old.
+        # Only the configured number of recent, unseen transactions is fetched.
+        options = {'limit': min(100, max(12, self.cfg.backfill_tx * 6)),
+                   'commitment': 'confirmed'}
         items = await self.rpc.call('getSignaturesForAddress', [token['account'], options], kind=BACKFILL)
         if not isinstance(items, list):
             return
-        oldest = time.time() - self.rules.window
-        for item in reversed(items):
+        oldest = self.chain_now() - self.rules.window
+        newest = []
+        for item in items:  # prioritize the newest unseen signatures
             signature = item.get('signature') if isinstance(item, dict) else None
             if not isinstance(signature, str) or item.get('err') is not None or self.db.seen(mint, signature):
                 continue
-            if (item.get('blockTime') or oldest) < oldest:
+            block_time = item.get('blockTime')
+            if isinstance(block_time, (int, float)) and block_time < oldest:
                 continue
+            newest.append(signature)
+            if len(newest) >= self.cfg.backfill_tx:
+                break
+        # Ingest chronologically so a later price never gets replaced by an
+        # older backfill price (even though selection favors the newest trades).
+        for signature in reversed(newest):
+            if self.db.seen(mint, signature):
+                continue  # live logs may have arrived while selecting signatures
             tx = await self.rpc.call('getTransaction', [signature, TX_OPTIONS], kind=BACKFILL)
             if tx is None:
                 continue
