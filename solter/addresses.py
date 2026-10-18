@@ -1,23 +1,18 @@
-"""Small Solana address helpers with no blockchain RPC dependency."""
+"""Solana address validation."""
 
-ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-DIGITS = {char: value for value, char in enumerate(ALPHABET)}
-WSOL = "So11111111111111111111111111111111111111112"
-USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
-USDT = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"
-QUOTE_MINTS = frozenset((WSOL, USDC, USDT))
+ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+DIGITS = {letter: value for value, letter in enumerate(ALPHABET)}
+SOL = 'So11111111111111111111111111111111111111112'
 
 
-def valid_mint(address: object) -> bool:
-    """Validate base58 encoding and 32 decoded bytes; no network calls."""
+def valid_address(address: object) -> bool:
     if not isinstance(address, str) or not 32 <= len(address) <= 44:
         return False
-    value = 0
-    for char in address:
-        digit = DIGITS.get(char)
+    number = 0
+    for letter in address:
+        digit = DIGITS.get(letter)
         if digit is None:
             return False
-        value = value * 58 + digit
-    zero_bytes = len(address) - len(address.lstrip('1'))
-    decoded_bytes = (value.bit_length() + 7) // 8
-    return zero_bytes + decoded_bytes == 32
+        number = number * 58 + digit
+    leading = len(address) - len(address.lstrip('1'))
+    return leading + (number.bit_length() + 7) // 8 == 32

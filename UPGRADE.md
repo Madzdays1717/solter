@@ -1,47 +1,28 @@
-# Upgrade bersih dari Solter v2.x (Termux)
+# Upgrade Solter 3.2
 
-**Jangan `git clean -fdx` atau hapus proyek seluruhnya:** langkah tersebut
-berisiko menghapus `.env`, database, atau berkas lokal lain yang penting.
+## Pemasangan aman
 
-1. Hentikan bot v2 dengan `Ctrl+C`.
-2. Lakukan backup dari folder lama `~/solter`:
+1. Hentikan bot yang sedang berjalan dengan `Ctrl+C`.
+2. Backup `.env` dan database `data/solter-v2.sqlite3`.
+3. Ekstrak paket ke folder baru agar file lama tidak ikut terbawa.
+4. Pindahkan `.env` dan database dari folder lama ke folder baru.
+5. Jalankan `python -m pip install -r requirements.txt`, `python bot.py doctor`, lalu `python bot.py run`.
 
-```sh
-cd ~/solter
-mkdir -p "$HOME/solter-backup"
-cp -p .env "$HOME/solter-backup/.env" 2>/dev/null || true
-cp -r data "$HOME/solter-backup/data" 2>/dev/null || true
-```
-
-3. Ekstrak ZIP v3 ke **folder terpisah**, misalnya:
+Contoh jika ZIP ada di folder Download Termux:
 
 ```sh
-mkdir -p "$HOME/solter-new"
-unzip "$HOME/storage/downloads/solter-v3.0.0-clean.zip" -d "$HOME/solter-new"
-```
-
-ZIP berisi direktori `solter-v3.0.0/`. Pilihan **teraman** adalah menjalankan
-folder baru secara terpisah dan **tidak** menjalankan dua bot dengan token
-Telegram sama:
-
-```sh
-cd "$HOME/solter-new/solter-v3.0.0"
-cp "$HOME/solter-backup/.env" .env
+cd ~
+mkdir -p solter-next
+unzip -oq ~/storage/downloads/solter-v3.2.0-independent.zip -d solter-next
+cd ~/solter-next/solter-v3.2.0
+cp ~/solter/.env .env
 mkdir -p data
-cp "$HOME/solter-backup/data/solter-v2.sqlite3" data/ 2>/dev/null || true
+cp ~/solter/data/solter-v2.sqlite3 data/solter-v2.sqlite3
 python -m pip install -r requirements.txt
 python bot.py doctor
 python bot.py run
 ```
 
-Setelah yakin folder baru yang ingin digunakan, Anda dapat mengganti folder
-lama dengan folder baru (jangan hapus backup terlebih dahulu).
+Sesuaikan lokasi `~/solter` jika folder yang dipakai berbeda. Jika database belum ada, abaikan perintah menyalinnya. Solter membuat tabel yang diperlukan dan menambahkan kolom state baru secara otomatis, tanpa menghapus riwayat call yang lama.
 
-Jika proyek juga berada di GitHub, **jangan** langsung `git push` dari folder
-baru yang tidak memiliki `.git`. Untuk membersihkan checkout Git yang ada,
-gunakan salah satu branch baru, hapus modul legacy di checkout, lalu salin
-berkas dari paket baru dan review `git status` sebelum commit.
-
-**Catatan kompatibilitas:** v3 memakai tabel `candidates` dan `alerts` yang
-berdampingan dengan tabel lama. Riwayat call v2 diimpor sebagai status `legacy`
-untuk mencegah call ganda. Database pribadi tidak ikut paket ZIP.
+Untuk mengganti isi repository GitHub, tempatkan isi folder `solter-v3.2.0` ke clone yang bersih dan review `git status` serta `git diff --cached` sebelum commit. Jangan commit `.env` atau database.

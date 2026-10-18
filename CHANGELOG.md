@@ -1,15 +1,11 @@
-# Changelog
+# Riwayat perubahan
 
-## 3.0.0 — Clean rewrite
+## 3.2.0
 
-- Replaced legacy multi-mode runtime with a single market scanner.
-- Removed RPC, wallet tracking, transaction backfill, milestone tracking,
-  hourly alert caps, post-call polling, presets and obsolete test suite.
-- Introduced persistent candidate inventory with fair hot/cold scheduling,
-  restart-safe state, detailed rejection reasons, and v2 call deduplication.
-- Retained free PumpPortal discovery, GeckoTerminal pool discovery and
-  DexScreener batch market snapshots.
-- Implemented adaptive early/breakout signals and nonblocking Telegram
-  delivery with optional source-provided banner (no image download).
-- Kept network pacing, deduplication, and data sanity checks.
-- No claim of live performance or profitability without production logs.
+- Perhitungan konsentrasi pembelian, perilaku developer, aktivitas awal, dan transaksi multi-wallet dari event teramati.
+- Parser trade membaca `breakdown` agar jumlah wallet dan nominal pembelian tidak dihitung secara keliru.
+- Informasi risiko ditampilkan dengan definisi yang jelas dalam alert Telegram.
+- State risiko awal dan identitas developer disimpan secara berkala dan dipulihkan setelah restart.
+- Pemulihan metadata peluncuran dibatasi dan tidak menghambat jalur transaksi utama.
+- Pendeteksian transaksi ganda memperhitungkan pool di dalam signature yang sama.
+- Struktur modul tetap memisahkan stream, perhitungan, penyimpanan, dan pengiriman.

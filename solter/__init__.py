@@ -1,3 +1,2 @@
-"""Solter: focused, free Solana market-momentum alerts."""
-
-__version__ = "3.0.0"
+"""Solter Pump.fun momentum scanner."""
+__version__ = '3.2.0'
