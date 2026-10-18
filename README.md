@@ -1,31 +1,28 @@
-# Solter 3.4.0
+# Solter 3.5.0
 
-Solter adalah pemantau momentum token baru Pump.fun dan PumpSwap. Aplikasi menerima event transaksi, menghitung metrik pasar secara lokal, lalu mengirim alert Telegram bila aktivitas pembelian dan likuiditas yang **teramati** mendukung sinyal. Setiap alert adalah informasi pasar, bukan bukti keamanan atau anjuran membeli.
+Scanner momentum untuk token Pump.fun dan PumpSwap dengan analisis transaksi lokal serta pengamatan sosial berbasis bukti. Solter berjalan di Termux dengan sumber data publik dan mengirim sinyal ke Telegram. Sinyal bukan rekomendasi investasi maupun jaminan token aman.
 
-## Cara kerja
+## Alur kerja
 
-1. `stream.py` menerima event `create`, `buy`, `sell`, dan `migrate` dari feed pihak ketiga.
-2. `events.py` memvalidasi format transaksi dan menormalisasi detail pembeli yang tersedia.
-3. `momentum.py` dan `risk.py` menghitung tekanan beli/jual, volume, pergerakan harga sejak pengamatan, pembeli teramati, dan aktivitas developer yang dapat dikenali.
-4. Ketika ada kandidat yang memenuhi syarat awal, `market.py` mencari snapshot Pump.fun (bonding curve) atau pool PumpSwap di DexScreener. Pemeriksaan ini punya tenggat **maksimal 1,7 detik** untuk setiap kandidat; kandidat lain tidak ikut menunggu. Respons eksternal adalah sumber data tambahan, bukan pengganti kronologi trade live.
-5. Mesin menghitung ulang kandidat dari event terbaru, menolak likuiditas sangat rendah atau tekanan jual besar yang *terkonfirmasi*, kemudian `telegram.py` mengirim notifikasi. Aplikasi mencatat status dan alasan di SQLite.
+1. `stream.py` menerima event launch, trade, dan migrasi.
+2. `events.py` memvalidasi dan menormalkan event, termasuk trader yang tercantum pada feed.
+3. `momentum.py` menghitung tekanan beli, volume dan pergerakan harga. `risk.py` meringkas aktivitas wallet **yang teramati**; tidak mengarang saldo holder atau identitas insider.
+4. `market.py` meminta snapshot untuk kandidat yang memenuhi syarat, dengan tenggat pendek. Data terlambat tidak menghambat penerimaan transaksi lain.
+5. `social.py` mengumpulkan **postingan Bluesky yang menyebut CA secara eksplisit** untuk kandidat prioritas. Jumlah posting, penulis unik, perkembangan per interval, serta kemiripan teks dihitung lokal. Pencarian berjalan pada worker terpisah; feed sosial tidak menentukan boleh/tidaknya alert.
+6. `telegram.py` mengirim alert berbahasa Indonesia. Apabila bukti sosial tiba setelah alert, Solter dapat memperbarui pesan yang sama.
+7. `storage.py` menyimpan peluncuran, riwayat alert, alasan penyaringan, dan ringkasan pengamatan sosial dalam SQLite.
 
-**Sumber data**
+## Cakupan sosial dan batas analisis
 
-- Stream transaksi: koneksi Socket.IO `sol.shrine.trade`; layanan pihak ketiga, sehingga kelengkapan, kuota, dan uptime tidak dijamin.
-- Pump.fun frontend API: profil, status pool dan MC yang tersedia untuk koin sebelum migrasi. Endpoint frontend dapat berubah tanpa pemberitahuan.
-- DexScreener API: MC, volume, likuiditas dan transaksi pool PumpSwap ketika sudah terindeks. Data snapshot tidak selalu seketika; bot membaca pool PumpSwap dan bukan pasangan DEX sembarang.
-- Telegram Bot API: pengiriman alert.
+Solter mengamati sebagian posting publik **Bluesky**, bukan keseluruhan X/Twitter, Telegram, TikTok, atau seluruh internet. Postingan harus memuat alamat kontrak yang sama agar tidak tertukar dengan token berticker serupa. Banyaknya posting di feed terbatas **tidak dapat dipakai sebagai estimasi jumlah seluruh posting di internet**.
 
-GMGN, Pump.fun, DexScreener dan Solscan disediakan sebagai tautan pada Telegram. GMGN **tidak dipakai untuk mengambil data otomatis** pada versi ini.
+- Status `Pembicaraan terpantau` menunjukkan adanya penyebutan CA pada sampel.
+- `Perhatian meningkat` dan `Perhatian mereda` adalah perubahan **dalam sampel terbatas**, bukan klaim meme sedang viral secara global.
+- `Pola promosi serupa` berarti sebagian posting memiliki teks yang hampir identik; bukan bukti bot, insider, maupun manipulasi terkoordinasi.
+- Tidak ditemukannya posting **bukan** bukti token tidak viral. Jika API sosial memblokir atau membatasi pencarian, analisis pasar dan Telegram tetap berfungsi.
+- Tidak ada inferensi top holder, persen developer holder, rug probability, ataupun jaminan sell pada harga tertentu. Analisis saldo yang akurat memerlukan data on-chain tambahan.
 
-## Batas kualitas data
-
-- Top 10 holders, persentase kepemilikan developer, sniper, bundler, dan estimasi rug tidak dapat dibuktikan hanya dari stream trade. Solter tidak menampilkan angka fiktif atau mengklaim token aman.
-- MC dari API pasar hanya ditampilkan bila snapshot relevan dengan waktu alert. MC hasil perkalian harga × suplai adalah **perkiraan**, bukan kapitalisasi suplai beredar yang pasti.
-- Jika sumber tambahan gagal atau terlambat, alert masih bisa dikirim bila syarat dari transaksi live sudah cukup. Ini menjaga latensi, tetapi risiko token tidak terverifikasi.
-- Waktu `event_to_delivery_ms` dihitung dari timestamp sumber hingga respons Telegram; angka bergantung juga pada ketepatan jam sumber.
-- Fokus usia token 0–60 menit; perhitungan usia memakai timestamp peluncuran.
+Pencarian sosial dibatasi satu request sekitar 10 detik, maksimum 120 kandidat tertunda, dan tidak menganalisis token yang sudah kehilangan relevansi dalam antrean. Setiap token diberi jeda minimal 60 detik antar pencarian. Saat penyedia merespons 429/403, pencarian ditunda sementara.
 
 ## Instalasi Termux
 
@@ -37,15 +34,8 @@ python bot.py doctor
 python bot.py run
 ```
 
-Isi `TELEGRAM_BOT_TOKEN` dan `TELEGRAM_CHAT_ID` pada `.env`. Jangan commit `.env` atau folder `data/`.
+Isi `TELEGRAM_BOT_TOKEN` dan `TELEGRAM_CHAT_ID` dalam `.env`. Jalankan `python bot.py stats` untuk metrik database, dan `python bot.py trace --mint ALAMAT_TOKEN` untuk riwayat token beserta ringkasan sosial teramati. Simpan `.env` dan `data/` hanya di perangkat pribadi.
 
-Perintah diagnosis:
+## Keandalan
 
-```sh
-python bot.py stats
-python bot.py trace --mint ALAMAT_TOKEN
-```
-
-## Pengukuran performa
-
-Perhatikan log `SIGNAL ... delay=` dan `ALERT ... event_to_delivery_ms=`. Uji dengan beberapa CA yang benar-benar bergerak: bandingkan saat token ditemukan, alasan penolakan, MC pada waktu alert dan data saat dibuka. Jangan menyimpulkan keberhasilan hanya dari jumlah alert.
+Provider transaksi Pump.fun/PumpSwap merupakan pihak ketiga sehingga akses, kuota, dan kelengkapan tidak dijamin. Sumber pencarian Bluesky juga dapat menerapkan batas akses. Untuk pengukuran keterlambatan, perhatikan log `SIGNAL` dan `ALERT ... event_to_delivery_ms`. Evaluasi kualitas alert dengan histori token yang lolos **dan** yang gagal.

@@ -32,6 +32,13 @@ class Storage:
             CREATE TABLE IF NOT EXISTS stream_state (
                 key TEXT PRIMARY KEY, value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS social_observations (
+                mint TEXT PRIMARY KEY, observed_at REAL NOT NULL,
+                status TEXT NOT NULL, posts INTEGER NOT NULL,
+                authors INTEGER NOT NULL, recent INTEGER NOT NULL,
+                earlier INTEGER NOT NULL, similar_pct REAL NOT NULL,
+                topic TEXT NOT NULL
+            );
         ''')
         columns = {row[1] for row in self.db.execute('PRAGMA table_info(launches)')}
         extra_columns = {
@@ -126,6 +133,21 @@ class Storage:
             self.db.executemany('UPDATE launches SET last_reason=? WHERE mint=?',
                                 [(reason, mint) for mint, reason in reasons.items()])
 
+    def save_social(self, mint: str, report) -> None:
+        with self.db:
+            self.db.execute('''
+                INSERT INTO social_observations
+                (mint, observed_at, status, posts, authors, recent, earlier, similar_pct, topic)
+                VALUES(?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(mint) DO UPDATE SET
+                    observed_at=excluded.observed_at,status=excluded.status,
+                    posts=excluded.posts,authors=excluded.authors,
+                    recent=excluded.recent,earlier=excluded.earlier,
+                    similar_pct=excluded.similar_pct,topic=excluded.topic
+            ''', (mint, report.observed_at, report.status,
+                  report.posts, report.authors, report.recent, report.earlier,
+                  report.similar_pct, report.topic))
+
     def already_alerted(self, mint: str) -> bool:
         for table in ('deliveries', 'alerts', 'calls'):
             if table not in self._tables:
@@ -166,6 +188,7 @@ class Storage:
             'alerts': {row['state']: row['total'] for row in self.db.execute(
                 'SELECT state, COUNT(*) total FROM deliveries GROUP BY state')},
             'checkpoint_slot': self.checkpoint()[0],
+            'social_tokens': self.db.execute('SELECT COUNT(*) FROM social_observations').fetchone()[0],
         }
 
     def trace(self, mint: str) -> dict:
@@ -176,5 +199,8 @@ class Storage:
         if launch:
             launch = dict(launch)
             launch['early_buyers'] = len(json.loads(launch['early_buyers']))
+        social = self.db.execute('SELECT * FROM social_observations WHERE mint=?',
+                                 (mint,)).fetchone()
         return {'launch': launch,
-                'delivery': dict(delivery) if delivery else None}
+                'delivery': dict(delivery) if delivery else None,
+                'social': dict(social) if social else None}

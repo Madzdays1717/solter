@@ -25,6 +25,7 @@ def main():
             'telegram_configured': config.telegram_ready,
             'market': 'Pump.fun / PumpSwap',
             'feed': 'live transactions',
+            'social': 'public posts (best effort)',
             'database': str(config.database_path),
         }, indent=2))
         return

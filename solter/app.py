@@ -15,6 +15,7 @@ from .metadata import parse_profile
 from .market import MarketReader, MarketSnapshot
 from .storage import Storage
 from .stream import TradeStream
+from .social import SocialMonitor
 from .telegram import Telegram
 
 LOG = logging.getLogger('solter')
@@ -46,6 +47,7 @@ class App:
         self.alert_tasks: set[asyncio.Task] = set()
         self.verifying: set[str] = set()
         self.market: MarketReader | None = None
+        self.social: SocialMonitor | None = None
         self.intake_count = 0
         self.call_count = 0
         self.stream = TradeStream(self.on_message, storage.checkpoint)
@@ -55,9 +57,10 @@ class App:
     async def run(self):
         timeout = aiohttp.ClientTimeout(total=12, connect=6)
         async with aiohttp.ClientSession(timeout=timeout,
-                headers={'User-Agent': 'Solter/3.4.0'}) as session:
+                headers={'User-Agent': 'Solter/3.5.0'}) as session:
             self.session = session
             self.market = MarketReader(session)
+            self.social = SocialMonitor(session, self.on_social_report)
             self.telegram = Telegram(session, self.config.telegram_token,
                                      self.config.telegram_chat_id)
             jobs = [
@@ -66,8 +69,9 @@ class App:
                 asyncio.create_task(self.enrich_unknown(), name='metadata-1'),
                 asyncio.create_task(self.enrich_unknown(), name='metadata-2'),
                 asyncio.create_task(self.refresh_sol_price(), name='sol-price'),
+                asyncio.create_task(self.social.run(), name='social-monitor'),
             ]
-            LOG.info('Solter 3.4.0 running; cached launches=%d', len(self.tokens))
+            LOG.info('Solter 3.5.0 running; cached launches=%d', len(self.tokens))
             try:
                 await asyncio.gather(*jobs)
             finally:
@@ -158,6 +162,10 @@ class App:
             return
         if len(token.observations) >= 3:
             self.queue_profile(token.mint)
+            # Social data is supplementary. The scanner never awaits this work.
+            buys = [e for e in token.observations if e.action == 'buy']
+            if len(buys) >= 4 and sum(e.volume_sol for e in buys) >= .5:
+                self.social.request(token.mint, priority=sum(e.volume_sol for e in buys))
         signal, reason = token.decide(now)
         if signal is None:
             # Keep the reason locally; persist it in the periodic flush.
@@ -165,6 +173,7 @@ class App:
             return
         if token.mint in self.verifying:
             return
+        self.social.request(token.mint, priority=100 + signal.buy_sol)
         self.verifying.add(token.mint)
         task = asyncio.create_task(self.verify_and_deliver(token.mint))
         self.alert_tasks.add(task)
@@ -230,10 +239,16 @@ class App:
             self.profile_requested.add(mint)
             self.profile_candidates.add(mint)
 
+    def on_social_report(self, mint: str, report):
+        self.storage.save_social(mint, report)
+        if mint in self.delivered:
+            self.queue_alert_update(mint)
+
     def signal_with_profile(self, signal):
         token = self.tokens.get(signal.mint)
         if token is None:
             return signal
+        report = self.social.reports.get(signal.mint) if self.social else None
         return replace(
             signal, name=token.name or signal.name,
             symbol=token.symbol or signal.symbol,
@@ -244,6 +259,12 @@ class App:
             reported_mc_usd=(token.reported_mc_usd if token.reported_mc_at > signal.reported_mc_at
                              else signal.reported_mc_usd),
             reported_mc_at=max(token.reported_mc_at, signal.reported_mc_at),
+            social_status=report.status if report else signal.social_status,
+            social_posts=report.posts if report else signal.social_posts,
+            social_authors=report.authors if report else signal.social_authors,
+            social_similarity=report.similar_pct if report else signal.social_similarity,
+            social_topic=report.topic if report else signal.social_topic,
+            social_observed_at=report.observed_at if report else signal.social_observed_at,
         )
 
     async def deliver(self, signal):
@@ -258,8 +279,8 @@ class App:
         if state == 'sent' and message:
             self.delivered[signal.mint] = (signal, sol_usd, message, kind)
             fresh = self.signal_with_profile(signal)
-            if (fresh.twitter, fresh.telegram, fresh.website, fresh.banner, fresh.image) != (
-                    signal.twitter, signal.telegram, signal.website, signal.banner, signal.image):
+            if (fresh.twitter, fresh.telegram, fresh.website, fresh.banner, fresh.image, fresh.social_status, fresh.social_posts, fresh.social_authors, fresh.social_topic, fresh.social_similarity) != (
+                    signal.twitter, signal.telegram, signal.website, signal.banner, signal.image, signal.social_status, signal.social_posts, signal.social_authors, signal.social_topic, signal.social_similarity):
                 self.queue_alert_update(signal.mint)
         LOG.info('ALERT %s %s event_to_delivery_ms=%d', state, signal.mint,
                  max(0, int((time.time() - signal.timestamp) * 1000)))
@@ -270,8 +291,8 @@ class App:
             return
         original, sol_usd, message_id, kind = sent
         updated = self.signal_with_profile(original)
-        if (original.twitter, original.telegram, original.website, original.banner, original.image) == (
-                updated.twitter, updated.telegram, updated.website, updated.banner, updated.image):
+        if (original.twitter, original.telegram, original.website, original.banner, original.image, original.social_status, original.social_posts, original.social_authors, original.social_topic, original.social_similarity) == (
+                updated.twitter, updated.telegram, updated.website, updated.banner, updated.image, updated.social_status, updated.social_posts, updated.social_authors, updated.social_topic, updated.social_similarity):
             return
         self.delivered[mint] = (updated, sol_usd, message_id, kind)
         task = asyncio.create_task(self.telegram.update(message_id, updated, sol_usd,
@@ -382,6 +403,12 @@ class App:
             for mint, token in list(self.tokens.items()):
                 if now - token.launched_at > MAX_AGE:
                     del self.tokens[mint]
+            if self.social:
+                self.social.prune(set(self.tokens))
             LOG.info('LIVE connected=%s events=%d tracked=%d signals=%d sol_usd=%s',
                      self.stream.connected, self.intake_count, len(self.tokens),
                      self.call_count, round(self.sol_usd, 2))
+            if self.social:
+                LOG.info('SOCIAL requests=%d failures=%d queued=%d reports=%d',
+                         self.social.queries, self.social.failures,
+                         len(self.social.pending), len(self.social.reports))

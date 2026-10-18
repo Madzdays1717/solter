@@ -38,6 +38,12 @@ class Signal:
     reported_mc_at: float = 0.0
     liquidity_usd: float = 0.0
     market_source: str = ""
+    social_status: str = ""
+    social_posts: int = 0
+    social_authors: int = 0
+    social_similarity: float = 0.0
+    social_topic: str = ""
+    social_observed_at: float = 0.0
 
 
 @dataclass

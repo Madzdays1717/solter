@@ -49,6 +49,17 @@ def pesan(signal: Signal, sol_usd: float) -> str:
             and signal.risk.buyer_concentration_pct >= 80):
         notes.append('⚠️ Pembelian terkonsentrasi pada sedikit wallet')
 
+    social = ''
+    if (signal.social_status and signal.social_posts >= 3
+            and signal.social_authors >= 2
+            and abs(time.time() - signal.social_observed_at) < 180):
+        social = (f'\n🌐 <b>Sosial (Bluesky):</b> {html.escape(signal.social_status)}\n'
+                  f'   {signal.social_posts} posting · {signal.social_authors} akun teramati\n')
+        if signal.social_status == 'Pola promosi serupa':
+            social += '   ⚠️ Pola posting mirip; bukan bukti manipulasi.\n'
+        if signal.social_topic:
+            social += f'   Topik terkait: {html.escape(signal.social_topic)}\n'
+
     return (
         f'⚡ <b>SOLTER · {phase}</b>\n'
         f'<b>{html.escape(signal.name)} (${html.escape(signal.symbol)})</b>\n'
@@ -61,6 +72,7 @@ def pesan(signal: Signal, sol_usd: float) -> str:
         + f'🟢 <b>Beli / Jual:</b> {signal.buys} / {signal.sells}\n'
         f'🕒 <b>Data terakhir:</b> {observed:%H:%M:%S} WIB\n'
         + ('\n'.join(notes) + '\n' if notes else '')
+        + social
         + '\n📋 <b>Alamat kontrak</b>\n'
         f'<code>{html.escape(signal.mint)}</code>\n'
         '<i>Data kepemilikan dan keamanan token belum diverifikasi.</i>'

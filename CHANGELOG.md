@@ -1,11 +1,10 @@
-# Perubahan
+# Catatan Rilis
 
-## 3.4.0
+## 3.5.0 — Social Observation
 
-- Pemeriksaan snapshot pasar terarah hanya untuk token yang telah lolos sinyal awal.
-- Pengambilan data Pump.fun dan pool PumpSwap dari DexScreener dengan batas durasi dan kapasitas.
-- Pemeriksaan ulang momentum sesudah snapshot; satu kandidat lambat tidak menghentikan kandidat lain.
-- Data MC dan likuiditas ditampilkan bila tersedia, dengan provenance dan keterbatasan data pasar.
-- Menghindari penolakan palsu akibat data identitas pembeli yang tidak disertakan oleh feed.
-- Notifikasi berbahasa Indonesia menonjolkan momentum terbaru, volume, tekanan beli, dan CA; teks "Perubahan harga 2 menit" dihilangkan.
-- Pelacakan keterlambatan event sampai respons Telegram.
+- Menambahkan `social.py` untuk pengamatan posting Bluesky publik yang menyebut CA token.
+- Menghitung jumlah posting, akun unik, perubahan perhatian dalam interval waktu, dan kemiripan pola teks secara lokal.
+- Menyimpan ringkasan sosial di SQLite dan menampilkannya melalui `trace --mint`.
+- Menambahkan informasi sosial ke Telegram jika tersedia; pekerjaan jaringan sosial diproses terpisah dari pengiriman alert.
+- Membatasi permintaan sosial secara otomatis dan menghormati pembatasan penyedia.
+- Mempertahankan evaluator pasar dan pengamanan yang ada tanpa menjadikan analisis sosial sebagai syarat call.
