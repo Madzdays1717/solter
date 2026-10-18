@@ -83,3 +83,7 @@ solter/addresses.py   Validasi alamat
 ## Verifikasi
 
 Startup lokal dapat dijalankan tanpa kredensial real. Koneksi stream nyata, kelengkapan event, dan pengiriman Telegram harus diperiksa pada perangkat dengan jaringan dan token bot yang aktif. Uji otomatis tidak dijalankan pada pembaruan ini.
+
+## Market cap
+
+Nilai market cap berasal dari `marketCapQuote` pada transaksi. Jika nilai tidak ada, Solter menggunakan harga transaksi dikali suplai token yang ditemukan saat peluncuran. Untuk pasangan SOL, angka diubah ke USD menggunakan harga SOL dari feed; snapshot harga dipakai sebagai cadangan bila diperlukan. Ketika salah satu data yang diperlukan belum tersedia, pesan menampilkan status informasi tersebut, bukan angka nol yang menyesatkan.

@@ -1,7 +1,7 @@
 """Rolling market observations and momentum decisions."""
 
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .events import Event
 from .risk import RiskAnalyzer, RiskReport
@@ -45,6 +45,7 @@ class Token:
     image: str = ''
     creator: str = ''
     initial_buy_sol: float = 0.0
+    supply: float = 0.0
     authority_observed: bool = False
     early_buyers: set[str] = field(default_factory=set)
     creator_buy_sol: float = 0.0
@@ -57,6 +58,7 @@ class Token:
         if event.action == 'create':
             self.creator = event.creator or self.creator
             self.initial_buy_sol = max(self.initial_buy_sol, event.initial_buy_sol)
+            self.supply = event.supply or self.supply
             self.authority_observed |= event.authority_observed
             self.restricted |= event.restricted
         if event.action == 'migrate' or event.protocol == 'PUMPSWAP':
@@ -66,6 +68,8 @@ class Token:
         if event.pool:
             self.pool = event.pool
         if event.action in ('buy', 'sell') and event.timestamp >= now - WINDOW:
+            if event.market_cap_sol <= 0 and self.supply > 0 and event.price_sol > 0:
+                event = replace(event, market_cap_sol=event.price_sol * self.supply)
             self.observations.append(event)
             for fill in event.fills:
                 if fill.side == 'buy' and event.timestamp <= self.launched_at + 30:
@@ -115,10 +119,13 @@ class Token:
         change = (last.price_sol / first.price_sol - 1) * 100
         if change < (3 if age > 1800 else 2):
             return None, 'price momentum building'
-        latest = max((e for e in events if e.market_cap_sol > 0 and e.pool_sol > 0),
-                     key=lambda e: e.timestamp, default=None)
+        latest = max((e for e in events if e.price_sol > 0 and e.pool_sol > 0),
+                     key=lambda e: (e.timestamp, e.slot), default=None)
         if latest is None or latest.timestamp < now - 20:
             return None, 'market data incomplete'
+        market_cap_sol = latest.market_cap_sol
+        if market_cap_sol <= 0 and self.supply > 0:
+            market_cap_sol = latest.price_sol * self.supply
         if self.phase == 'PumpSwap' and latest.pool_sol < 8:
             return None, 'shallow pool'
         if self.phase == 'Pump.fun' and age < 8:
@@ -147,7 +154,7 @@ class Token:
             mint=self.mint, name=self.name or 'Token', symbol=self.symbol or 'TOKEN',
             phase=self.phase, age_seconds=age, buys=len(buys), sells=len(sells),
             buy_sol=buy_sol, sell_sol=sell_sol, buyers=len(buyers), change_pct=change,
-            market_cap_sol=latest.market_cap_sol, pool_sol=latest.pool_sol,
+            market_cap_sol=market_cap_sol, pool_sol=latest.pool_sol,
             price_sol=latest.price_sol, score=score, timestamp=latest.timestamp,
             risk=risk, image=self.image,
             warning='High volatility' if change > 85 else '',

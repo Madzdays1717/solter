@@ -14,8 +14,13 @@ LOG = logging.getLogger('solter.telegram')
 
 
 def format_signal(signal: Signal, sol_usd: float) -> str:
-    cap = (f'${signal.market_cap_sol * sol_usd:,.0f}' if sol_usd > 0
-           else f'{signal.market_cap_sol:,.1f} SOL')
+    if signal.market_cap_sol <= 0:
+        cap = 'Belum tersedia'
+    elif sol_usd > 0:
+        cap_usd = signal.market_cap_sol * sol_usd
+        cap = f'${cap_usd:,.2f}' if cap_usd < 1 else f'${cap_usd:,.0f}'
+    else:
+        cap = f'{signal.market_cap_sol:,.4f} SOL (USD belum tersedia)'
     volume_sol = signal.buy_sol + signal.sell_sol
     volume = (f'${volume_sol * sol_usd:,.0f}' if sol_usd > 0
               else f'{volume_sol:.2f} SOL')

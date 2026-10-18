@@ -16,6 +16,7 @@ from .telegram import Telegram
 
 LOG = logging.getLogger('solter')
 COIN_API = 'https://frontend-api-v3.pump.fun/coins-v2/'
+SOL_PRICE_API = 'https://sol.shrine.trade/sol-price'
 
 
 class App:
@@ -54,8 +55,9 @@ class App:
                 asyncio.create_task(self.stream.run(session), name='market-stream'),
                 asyncio.create_task(self.housekeeping(), name='housekeeping'),
                 asyncio.create_task(self.enrich_unknown(), name='launch-lookup'),
+                asyncio.create_task(self.refresh_sol_price(), name='sol-price'),
             ]
-            LOG.info('Solter 3.2 running; cached launches=%d', len(self.tokens))
+            LOG.info('Solter 3.2.1 running; cached launches=%d', len(self.tokens))
             try:
                 await asyncio.gather(*jobs)
             finally:
@@ -65,6 +67,24 @@ class App:
                 self.flush()
                 if self.alert_tasks:
                     await asyncio.wait(self.alert_tasks, timeout=8)
+
+    async def refresh_sol_price(self):
+        while True:
+            if self.sol_usd <= 0:
+                try:
+                    async with self.session.get(
+                        SOL_PRICE_API, timeout=aiohttp.ClientTimeout(total=4)
+                    ) as response:
+                        if response.status == 200:
+                            data = await response.json(content_type=None)
+                            price = number(data.get('priceUSD')) if isinstance(data, dict) else 0
+                            if 1 < price < 2000:
+                                self.sol_usd = price
+                        else:
+                            LOG.debug('SOL price HTTP %d', response.status)
+                except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                    LOG.debug('SOL price snapshot unavailable')
+            await asyncio.sleep(45)
 
     def on_message(self, kind: str, data: object):
         if kind == 'sol_price':

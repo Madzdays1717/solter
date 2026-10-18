@@ -37,6 +37,7 @@ class Storage:
         extra_columns = {
             'creator': "TEXT NOT NULL DEFAULT ''",
             'initial_buy_sol': 'REAL NOT NULL DEFAULT 0',
+            'supply': 'REAL NOT NULL DEFAULT 0',
             'creator_buy_sol': 'REAL NOT NULL DEFAULT 0',
             'creator_sell_sol': 'REAL NOT NULL DEFAULT 0',
             'authority_observed': 'INTEGER NOT NULL DEFAULT 0',
@@ -67,6 +68,7 @@ class Storage:
                 name=row['name'], symbol=row['symbol'], phase=row['phase'],
                 restricted=bool(row['restricted']), pool=row['pool'], image=row['image'],
                 creator=row['creator'], initial_buy_sol=row['initial_buy_sol'],
+                supply=row['supply'],
                 authority_observed=bool(row['authority_observed']),
                 creator_buy_sol=row['creator_buy_sol'], creator_sell_sol=row['creator_sell_sol'],
                 early_buyers=early,
@@ -80,8 +82,8 @@ class Storage:
                 INSERT INTO launches (
                     mint,created_at,name,symbol,phase,restricted,pool,image,last_seen,
                     creator,initial_buy_sol,creator_buy_sol,creator_sell_sol,
-                    authority_observed,early_buyers
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    authority_observed,early_buyers,supply
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(mint) DO UPDATE SET
                     name=excluded.name,symbol=excluded.symbol,phase=excluded.phase,
                     restricted=excluded.restricted,pool=excluded.pool,
@@ -90,7 +92,8 @@ class Storage:
                     creator_buy_sol=excluded.creator_buy_sol,
                     creator_sell_sol=excluded.creator_sell_sol,
                     authority_observed=excluded.authority_observed,
-                    early_buyers=excluded.early_buyers
+                    early_buyers=excluded.early_buyers,
+                    supply=excluded.supply
             ''', [
                 (token.mint, token.launched_at, token.name, token.symbol, token.phase,
                  int(token.restricted), token.pool, token.image,
@@ -98,7 +101,7 @@ class Storage:
                  token.creator, token.initial_buy_sol,
                  token.creator_buy_sol, token.creator_sell_sol,
                  int(token.authority_observed),
-                 json.dumps(sorted(token.early_buyers)))
+                 json.dumps(sorted(token.early_buyers)), token.supply)
                 for token in tokens
             ])
 

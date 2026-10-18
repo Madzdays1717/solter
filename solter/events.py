@@ -26,6 +26,7 @@ class Event:
     price_sol: float = 0.0
     volume_sol: float = 0.0
     market_cap_sol: float = 0.0
+    supply: float = 0.0
     pool_sol: float = 0.0
     fills: tuple[Fill, ...] = ()
     name: str = ''
@@ -106,6 +107,7 @@ def parse_event(raw: object, *, now: float | None = None) -> Event | None:
         pool=str(raw.get('pool') or raw.get('toPool') or '')[:80],
         price_sol=price, volume_sol=volume,
         market_cap_sol=number(raw.get('marketCapQuote')),
+        supply=number(raw.get('supply')) if action == 'create' else 0.0,
         pool_sol=number(raw.get('quoteInPool')),
         fills=tuple(fills),
         name=str(raw.get('name') or '')[:80],
