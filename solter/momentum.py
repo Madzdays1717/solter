@@ -26,11 +26,18 @@ class Signal:
     market_cap_sol: float
     pool_sol: float
     price_sol: float
-    score: int
     timestamp: float
     risk: RiskReport
     image: str = ''
+    banner: str = ''
     warning: str = ''
+    twitter: str = ''
+    telegram: str = ''
+    website: str = ''
+    reported_mc_usd: float = 0.0
+    reported_mc_at: float = 0.0
+    liquidity_usd: float = 0.0
+    market_source: str = ""
 
 
 @dataclass
@@ -43,6 +50,12 @@ class Token:
     pool: str = ''
     restricted: bool = False
     image: str = ''
+    banner: str = ''
+    twitter: str = ''
+    telegram: str = ''
+    website: str = ''
+    reported_mc_usd: float = 0.0
+    reported_mc_at: float = 0.0
     creator: str = ''
     initial_buy_sol: float = 0.0
     supply: float = 0.0
@@ -105,8 +118,10 @@ class Token:
         buyers = {fill.wallet for e in buys for fill in e.fills if fill.side == 'buy'}
         if len(buys) < (10 if age > 1800 else 7):
             return None, 'buy activity building'
-        if len(buyers) < 4:
+        if buyers and len(buyers) < 4:
             return None, 'low observed buyer diversity'
+        if not buyers and len(buys) < 11:
+            return None, 'awaiting confirmation without wallet details'
         if buy_sol < (2 if age > 1800 else 1):
             return None, 'buy volume building'
         if buy_sol < 1.5 * max(.05, sell_sol) or buy_sol - sell_sol < (.8 if age > 1800 else .5):
@@ -147,15 +162,14 @@ class Token:
         )
         if recent_creator_sells >= buy_sol and recent_creator_sells >= 1:
             return None, 'substantial recent developer selling'
-        score = round(min(100, 30 + min(25, (buy_sol - sell_sol) * 6)
-                               + min(20, len(buyers) * 2)
-                               + min(25, change * .7)))
         return Signal(
             mint=self.mint, name=self.name or 'Token', symbol=self.symbol or 'TOKEN',
             phase=self.phase, age_seconds=age, buys=len(buys), sells=len(sells),
             buy_sol=buy_sol, sell_sol=sell_sol, buyers=len(buyers), change_pct=change,
             market_cap_sol=market_cap_sol, pool_sol=latest.pool_sol,
-            price_sol=latest.price_sol, score=score, timestamp=latest.timestamp,
-            risk=risk, image=self.image,
+            price_sol=latest.price_sol, timestamp=latest.timestamp,
+            risk=risk, image=self.image, banner=self.banner,
             warning='High volatility' if change > 85 else '',
+            twitter=self.twitter, telegram=self.telegram, website=self.website,
+            reported_mc_usd=self.reported_mc_usd, reported_mc_at=self.reported_mc_at,
         ), 'momentum confirmed'

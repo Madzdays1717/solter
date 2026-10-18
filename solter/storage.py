@@ -42,6 +42,12 @@ class Storage:
             'creator_sell_sol': 'REAL NOT NULL DEFAULT 0',
             'authority_observed': 'INTEGER NOT NULL DEFAULT 0',
             'early_buyers': "TEXT NOT NULL DEFAULT '[]'",
+            'banner': "TEXT NOT NULL DEFAULT ''",
+            'twitter': "TEXT NOT NULL DEFAULT ''",
+            'telegram': "TEXT NOT NULL DEFAULT ''",
+            'website': "TEXT NOT NULL DEFAULT ''",
+            'reported_mc_usd': 'REAL NOT NULL DEFAULT 0',
+            'reported_mc_at': 'REAL NOT NULL DEFAULT 0',
         }
         for column, definition in extra_columns.items():
             if column not in columns:
@@ -66,12 +72,14 @@ class Storage:
             token = Token(
                 mint=row['mint'], launched_at=row['created_at'],
                 name=row['name'], symbol=row['symbol'], phase=row['phase'],
-                restricted=bool(row['restricted']), pool=row['pool'], image=row['image'],
+                restricted=bool(row['restricted']), pool=row['pool'], image=row['image'], banner=row['banner'],
                 creator=row['creator'], initial_buy_sol=row['initial_buy_sol'],
                 supply=row['supply'],
                 authority_observed=bool(row['authority_observed']),
                 creator_buy_sol=row['creator_buy_sol'], creator_sell_sol=row['creator_sell_sol'],
-                early_buyers=early,
+                early_buyers=early, twitter=row['twitter'], telegram=row['telegram'],
+                website=row['website'], reported_mc_usd=row['reported_mc_usd'],
+                reported_mc_at=row['reported_mc_at'],
             )
             result[token.mint] = token
         return result
@@ -82,18 +90,22 @@ class Storage:
                 INSERT INTO launches (
                     mint,created_at,name,symbol,phase,restricted,pool,image,last_seen,
                     creator,initial_buy_sol,creator_buy_sol,creator_sell_sol,
-                    authority_observed,early_buyers,supply
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    authority_observed,early_buyers,supply,twitter,telegram,website,
+                    reported_mc_usd,reported_mc_at,banner
+                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(mint) DO UPDATE SET
                     name=excluded.name,symbol=excluded.symbol,phase=excluded.phase,
                     restricted=excluded.restricted,pool=excluded.pool,
-                    image=excluded.image,last_seen=excluded.last_seen,
+                    image=excluded.image,banner=excluded.banner,last_seen=excluded.last_seen,
                     creator=excluded.creator,initial_buy_sol=excluded.initial_buy_sol,
                     creator_buy_sol=excluded.creator_buy_sol,
                     creator_sell_sol=excluded.creator_sell_sol,
                     authority_observed=excluded.authority_observed,
                     early_buyers=excluded.early_buyers,
-                    supply=excluded.supply
+                    supply=excluded.supply,
+                    twitter=excluded.twitter,telegram=excluded.telegram,
+                    website=excluded.website,reported_mc_usd=excluded.reported_mc_usd,
+                    reported_mc_at=excluded.reported_mc_at
             ''', [
                 (token.mint, token.launched_at, token.name, token.symbol, token.phase,
                  int(token.restricted), token.pool, token.image,
@@ -101,7 +113,9 @@ class Storage:
                  token.creator, token.initial_buy_sol,
                  token.creator_buy_sol, token.creator_sell_sol,
                  int(token.authority_observed),
-                 json.dumps(sorted(token.early_buyers)), token.supply)
+                 json.dumps(sorted(token.early_buyers)), token.supply,
+                 token.twitter, token.telegram, token.website,
+                 token.reported_mc_usd, token.reported_mc_at, token.banner)
                 for token in tokens
             ])
 

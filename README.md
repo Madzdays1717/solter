@@ -1,46 +1,35 @@
-# Solter 3.2
+# Solter 3.4.0
 
-Solter memantau momentum token Pump.fun dan PumpSwap pada satu jam pertama sejak token diluncurkan. Transaksi dari satu feed live diproses menjadi ringkasan aktivitas pasar, penilaian risiko berbasis transaksi, dan alert Telegram.
+Solter adalah pemantau momentum token baru Pump.fun dan PumpSwap. Aplikasi menerima event transaksi, menghitung metrik pasar secara lokal, lalu mengirim alert Telegram bila aktivitas pembelian dan likuiditas yang **teramati** mendukung sinyal. Setiap alert adalah informasi pasar, bukan bukti keamanan atau anjuran membeli.
 
-## Alur
+## Cara kerja
 
-```text
-Transaction stream
-    → Normalisasi event
-    → Token aktif (usia 0–60 menit)
-    → Momentum + analisis aktivitas wallet
-    → Keputusan
-    → Telegram
-```
+1. `stream.py` menerima event `create`, `buy`, `sell`, dan `migrate` dari feed pihak ketiga.
+2. `events.py` memvalidasi format transaksi dan menormalisasi detail pembeli yang tersedia.
+3. `momentum.py` dan `risk.py` menghitung tekanan beli/jual, volume, pergerakan harga sejak pengamatan, pembeli teramati, dan aktivitas developer yang dapat dikenali.
+4. Ketika ada kandidat yang memenuhi syarat awal, `market.py` mencari snapshot Pump.fun (bonding curve) atau pool PumpSwap di DexScreener. Pemeriksaan ini punya tenggat **maksimal 1,7 detik** untuk setiap kandidat; kandidat lain tidak ikut menunggu. Respons eksternal adalah sumber data tambahan, bukan pengganti kronologi trade live.
+5. Mesin menghitung ulang kandidat dari event terbaru, menolak likuiditas sangat rendah atau tekanan jual besar yang *terkonfirmasi*, kemudian `telegram.py` mengirim notifikasi. Aplikasi mencatat status dan alasan di SQLite.
 
-Sumber transaksi: [Shrine Advanced Data Stream](https://shrine.trade/pump/data-api/stream/). Provider menyediakan event transaksi dan peluncuran Pump.fun/PumpSwap. Koneksi Socket.IO digunakan sesuai dokumentasinya. Kecepatan, cakupan event, dan kontinuitas layanan bergantung pada provider. Satu koneksi mengalirkan banyak token; Solter tidak membuat request HTTP per transaksi.
+**Sumber data**
 
-## Analisis mandiri
+- Stream transaksi: koneksi Socket.IO `sol.shrine.trade`; layanan pihak ketiga, sehingga kelengkapan, kuota, dan uptime tidak dijamin.
+- Pump.fun frontend API: profil, status pool dan MC yang tersedia untuk koin sebelum migrasi. Endpoint frontend dapat berubah tanpa pemberitahuan.
+- DexScreener API: MC, volume, likuiditas dan transaksi pool PumpSwap ketika sudah terindeks. Data snapshot tidak selalu seketika; bot membaca pool PumpSwap dan bukan pasangan DEX sembarang.
+- Telegram Bot API: pengiriman alert.
 
-**Momentum**, dihitung dari transaksi selama dua menit terakhir:
+GMGN, Pump.fun, DexScreener dan Solscan disediakan sebagai tautan pada Telegram. GMGN **tidak dipakai untuk mengambil data otomatis** pada versi ini.
 
-- Volume beli dan jual dalam SOL, arus beli bersih, dan persentase perubahan harga.
-- Banyaknya transaksi dan wallet pembeli yang dapat diidentifikasi dari rincian trade.
-- Market cap dalam SOL dan cadangan pool yang dilaporkan stream.
-- Usia token menurut waktu peluncuran, tetap sama ketika migrasi ke PumpSwap.
+## Batas kualitas data
 
-**Risiko**, dihitung dari data transaksi yang tersedia:
+- Top 10 holders, persentase kepemilikan developer, sniper, bundler, dan estimasi rug tidak dapat dibuktikan hanya dari stream trade. Solter tidak menampilkan angka fiktif atau mengklaim token aman.
+- MC dari API pasar hanya ditampilkan bila snapshot relevan dengan waktu alert. MC hasil perkalian harga × suplai adalah **perkiraan**, bukan kapitalisasi suplai beredar yang pasti.
+- Jika sumber tambahan gagal atau terlambat, alert masih bisa dikirim bila syarat dari transaksi live sudah cukup. Ini menjaga latensi, tetapi risiko token tidak terverifikasi.
+- Waktu `event_to_delivery_ms` dihitung dari timestamp sumber hingga respons Telegram; angka bergantung juga pada ketepatan jam sumber.
+- Fokus usia token 0–60 menit; perhitungan usia memakai timestamp peluncuran.
 
-- Porsi volume beli tiga wallet teratas selama jendela dua menit.
-- Pembelian dan penjualan oleh alamat pembuat token, bila alamat tersebut diketahui.
-- Jumlah pembeli yang terlihat dalam 30 detik awal.
-- Jumlah transaksi dengan beberapa wallet berbeda.
-- Indikasi kontrol mint dan freeze dari event peluncuran.
-
-Pembelian oleh tiga wallet teratas **bukan** persentase token yang dimiliki tiga holder teratas. Transaksi dengan banyak wallet **bukan bukti** bundling/insider. Wallet yang tidak teridentifikasi dan transfer token di luar trade tidak dapat dipakai untuk menghitung kepemilikan. Solter tidak memberikan status *aman* berdasarkan metrik ini.
-
-Pada stream yang melaporkan rincian tiap swap, evaluator memakai wallet sebenarnya dalam `breakdown`. Bila daftar wallet tidak disertai volume per wallet, volume tidak dibagi rata atau diklaim sebagai kepemilikan wallet.
-
-## Menjalankan di Termux
+## Instalasi Termux
 
 ```sh
-pkg update
-pkg install python
 python -m pip install -r requirements.txt
 cp .env.example .env
 nano .env
@@ -48,42 +37,15 @@ python bot.py doctor
 python bot.py run
 ```
 
-Isi `TELEGRAM_BOT_TOKEN` dan `TELEGRAM_CHAT_ID`. Untuk membaca statistik dan jejak token:
+Isi `TELEGRAM_BOT_TOKEN` dan `TELEGRAM_CHAT_ID` pada `.env`. Jangan commit `.env` atau folder `data/`.
+
+Perintah diagnosis:
 
 ```sh
 python bot.py stats
-python bot.py trace --mint 3NxfWMHmfQg8NJFW5AG1ti2xACdczWz24e9SKyk1pump
+python bot.py trace --mint ALAMAT_TOKEN
 ```
 
-SQLite menyimpan metadata token, indikator risiko yang dipantau sejak peluncuran, status alert, dan checkpoint stream. Untuk mengurangi operasi disk, keadaan token ditulis berkala. Rolling window trade dua menit hanya berada di memori dan akan terkumpul kembali setelah restart.
+## Pengukuran performa
 
-## Struktur
-
-```text
-bot.py                CLI
-solter/app.py         Pengatur proses
-solter/stream.py      Koneksi Socket.IO
-solter/events.py      Parser dan validasi data
-solter/momentum.py    Status token dan evaluator momentum
-solter/risk.py        Ringkasan risiko berbasis transaksi
-solter/storage.py     Penyimpanan SQLite
-solter/telegram.py    Format dan pengiriman pesan
-solter/config.py      Pengaturan operator
-solter/addresses.py   Validasi alamat
-```
-
-## Operasional
-
-- Pesan alert memuat status risiko dari transaksi yang teramati, bukan sertifikasi keamanan token.
-- Aliran ulang `sinceSlot` membantu pemulihan koneksi, tetapi event yang hilang dari upstream tetap mungkin tidak tertangkap.
-- Token yang belum terlihat event peluncurannya dapat dicari terbatas melalui metadata Pump.fun secara terpisah. Ketersediaannya mengikuti penyedia layanan.
-- Terminal Android dapat menghentikan aplikasi saat perangkat memasuki mode hemat daya; gunakan pengaturan Termux yang sesuai jika menjalankan 24 jam.
-- Alert hanya informasi. Solter tidak melakukan pembelian atau penjualan otomatis.
-
-## Verifikasi
-
-Startup lokal dapat dijalankan tanpa kredensial real. Koneksi stream nyata, kelengkapan event, dan pengiriman Telegram harus diperiksa pada perangkat dengan jaringan dan token bot yang aktif. Uji otomatis tidak dijalankan pada pembaruan ini.
-
-## Market cap
-
-Nilai market cap berasal dari `marketCapQuote` pada transaksi. Jika nilai tidak ada, Solter menggunakan harga transaksi dikali suplai token yang ditemukan saat peluncuran. Untuk pasangan SOL, angka diubah ke USD menggunakan harga SOL dari feed; snapshot harga dipakai sebagai cadangan bila diperlukan. Ketika salah satu data yang diperlukan belum tersedia, pesan menampilkan status informasi tersebut, bukan angka nol yang menyesatkan.
+Perhatikan log `SIGNAL ... delay=` dan `ALERT ... event_to_delivery_ms=`. Uji dengan beberapa CA yang benar-benar bergerak: bandingkan saat token ditemukan, alasan penolakan, MC pada waktu alert dan data saat dibuka. Jangan menyimpulkan keberhasilan hanya dari jumlah alert.

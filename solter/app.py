@@ -2,6 +2,7 @@
 
 import asyncio
 from collections import deque
+from dataclasses import replace
 import logging
 import time
 
@@ -10,12 +11,15 @@ import aiohttp
 from .config import Config
 from .events import Event, number, parse_event
 from .momentum import MAX_AGE, Token
+from .metadata import parse_profile
+from .market import MarketReader, MarketSnapshot
 from .storage import Storage
 from .stream import TradeStream
 from .telegram import Telegram
 
 LOG = logging.getLogger('solter')
 COIN_API = 'https://frontend-api-v3.pump.fun/coins-v2/'
+PROFILE_API = 'https://sol.shrine.trade/metadata'
 SOL_PRICE_API = 'https://sol.shrine.trade/sol-price'
 
 
@@ -27,17 +31,21 @@ class App:
         self.pending: set[str] = set()
         self.pending_events: dict[str, deque[Event]] = {}
         self.sol_usd = 0.0
+        self.sol_price_updated_at = 0.0
         self.last_slot = storage.checkpoint()[0]
         self.last_flush = time.monotonic()
         self.seen: set[tuple[str, str, str, str]] = set()
         self.seen_order: deque[tuple[str, str, str, str]] = deque()
         self.changed: set[str] = set()
         self.notified: set[str] = set()
-        self.image_candidates: set[str] = set()
-        self.image_requested: set[str] = set()
+        self.profile_candidates: set[str] = set()
+        self.profile_requested: set[str] = set()
+        self.delivered: dict[str, tuple[object, float, int, str]] = {}
         self.lookup_attempts: dict[str, int] = {}
         self._reasons: dict[str, str] = {}
         self.alert_tasks: set[asyncio.Task] = set()
+        self.verifying: set[str] = set()
+        self.market: MarketReader | None = None
         self.intake_count = 0
         self.call_count = 0
         self.stream = TradeStream(self.on_message, storage.checkpoint)
@@ -47,17 +55,19 @@ class App:
     async def run(self):
         timeout = aiohttp.ClientTimeout(total=12, connect=6)
         async with aiohttp.ClientSession(timeout=timeout,
-                headers={'User-Agent': 'Solter/3.2'}) as session:
+                headers={'User-Agent': 'Solter/3.4.0'}) as session:
             self.session = session
+            self.market = MarketReader(session)
             self.telegram = Telegram(session, self.config.telegram_token,
                                      self.config.telegram_chat_id)
             jobs = [
                 asyncio.create_task(self.stream.run(session), name='market-stream'),
                 asyncio.create_task(self.housekeeping(), name='housekeeping'),
-                asyncio.create_task(self.enrich_unknown(), name='launch-lookup'),
+                asyncio.create_task(self.enrich_unknown(), name='metadata-1'),
+                asyncio.create_task(self.enrich_unknown(), name='metadata-2'),
                 asyncio.create_task(self.refresh_sol_price(), name='sol-price'),
             ]
-            LOG.info('Solter 3.2.1 running; cached launches=%d', len(self.tokens))
+            LOG.info('Solter 3.4.0 running; cached launches=%d', len(self.tokens))
             try:
                 await asyncio.gather(*jobs)
             finally:
@@ -70,7 +80,7 @@ class App:
 
     async def refresh_sol_price(self):
         while True:
-            if self.sol_usd <= 0:
+            if time.time() - self.sol_price_updated_at > 90:
                 try:
                     async with self.session.get(
                         SOL_PRICE_API, timeout=aiohttp.ClientTimeout(total=4)
@@ -80,6 +90,7 @@ class App:
                             price = number(data.get('priceUSD')) if isinstance(data, dict) else 0
                             if 1 < price < 2000:
                                 self.sol_usd = price
+                                self.sol_price_updated_at = time.time()
                         else:
                             LOG.debug('SOL price HTTP %d', response.status)
                 except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
@@ -90,6 +101,7 @@ class App:
         if kind == 'sol_price':
             if isinstance(data, dict) and 1 < number(data.get('priceUSD')) < 2000:
                 self.sol_usd = number(data['priceUSD'])
+                self.sol_price_updated_at = time.time()
             return
         event = parse_event(data)
         if event is None:
@@ -144,94 +156,213 @@ class App:
             return
         if token.mint in self.notified:
             return
-        if not token.image and len(token.observations) >= 3 and token.mint not in self.image_requested:
-            self.image_requested.add(token.mint)
-            self.image_candidates.add(token.mint)
+        if len(token.observations) >= 3:
+            self.queue_profile(token.mint)
         signal, reason = token.decide(now)
         if signal is None:
             # Keep the reason locally; persist it in the periodic flush.
             self.reasons[token.mint] = reason
             return
-        if self.storage.already_alerted(token.mint):
-            self.notified.add(token.mint)
+        if token.mint in self.verifying:
             return
-        if self.storage.reserve(token.mint):
-            self.notified.add(token.mint)
+        self.verifying.add(token.mint)
+        task = asyncio.create_task(self.verify_and_deliver(token.mint))
+        self.alert_tasks.add(task)
+        task.add_done_callback(self.alert_tasks.discard)
+
+    async def verify_and_deliver(self, mint: str):
+        """Read optional market data within a deadline, then evaluate fresh trades."""
+        try:
+            token = self.tokens.get(mint)
+            if token is None:
+                return
+            snapshot = await self.market.read(mint, token.phase)
+            token = self.tokens.get(mint)
+            if token is None:
+                return
+            signal, reason = token.decide(time.time())
+            if signal is None:
+                self.reasons[mint] = reason
+                return
+            if snapshot:
+                # External snapshots confirm available data, but do not override
+                # the chronology of the incoming live transaction stream.
+                if snapshot.liquidity_usd and token.phase == 'PumpSwap' and snapshot.liquidity_usd < 3000:
+                    self.reasons[mint] = 'liquidity too thin'
+                    return
+                if snapshot.buys_5m + snapshot.sells_5m >= 20 and snapshot.sells_5m > 3 * max(1, snapshot.buys_5m):
+                    self.reasons[mint] = 'market sell pressure'
+                    return
+                signal = replace(
+                    signal, reported_mc_usd=snapshot.market_cap_usd or signal.reported_mc_usd,
+                    reported_mc_at=snapshot.observed_at if snapshot.market_cap_usd else signal.reported_mc_at,
+                    image=snapshot.image or signal.image,
+                    banner=snapshot.banner or signal.banner,
+                    twitter=snapshot.twitter or signal.twitter,
+                    telegram=snapshot.telegram or signal.telegram,
+                    website=snapshot.website or signal.website,
+                    liquidity_usd=snapshot.liquidity_usd,
+                    market_source=snapshot.source,
+                )
+            if self.storage.already_alerted(mint):
+                self.notified.add(mint)
+                return
+            if not self.storage.reserve(mint):
+                self.notified.add(mint)
+                return
+            self.notified.add(mint)
             self.call_count += 1
-            LOG.info('SIGNAL %s age=%ds buys=%d net=%.2f SOL',
-                     token.mint, int(signal.age_seconds), signal.buys,
-                     signal.buy_sol - signal.sell_sol)
-            task = asyncio.create_task(self.deliver(signal))
-            self.alert_tasks.add(task)
-            task.add_done_callback(self.alert_tasks.discard)
+            delay = time.time() - signal.timestamp
+            LOG.info('SIGNAL %s age=%ds delay=%.2fs buy=%.2f SOL',
+                     mint, int(signal.age_seconds), delay, signal.buy_sol)
+            await self.deliver(signal)
+        except Exception:
+            LOG.exception('Signal evaluation failed for %s', mint)
+        finally:
+            self.verifying.discard(mint)
 
     @property
     def reasons(self):
         return self._reasons
 
+    def queue_profile(self, mint: str):
+        if mint not in self.profile_requested:
+            self.profile_requested.add(mint)
+            self.profile_candidates.add(mint)
+
+    def signal_with_profile(self, signal):
+        token = self.tokens.get(signal.mint)
+        if token is None:
+            return signal
+        return replace(
+            signal, name=token.name or signal.name,
+            symbol=token.symbol or signal.symbol,
+            image=token.image or signal.image, banner=token.banner or signal.banner,
+            twitter=token.twitter or signal.twitter,
+            telegram=token.telegram or signal.telegram,
+            website=token.website or signal.website,
+            reported_mc_usd=(token.reported_mc_usd if token.reported_mc_at > signal.reported_mc_at
+                             else signal.reported_mc_usd),
+            reported_mc_at=max(token.reported_mc_at, signal.reported_mc_at),
+        )
+
     async def deliver(self, signal):
+        sol_usd = self.sol_usd if time.time() - self.sol_price_updated_at <= 120 else 0.0
+        signal = self.signal_with_profile(signal)
         try:
-            state, message = await self.telegram.send(signal, self.sol_usd)
+            state, message, kind = await self.telegram.send(signal, sol_usd)
         except Exception:
             LOG.exception('Alert delivery exception')
-            state, message = 'uncertain', None
+            state, message, kind = 'uncertain', None, 'text'
         self.storage.finish(signal.mint, state, message)
-        LOG.info('ALERT %s %s', state, signal.mint)
+        if state == 'sent' and message:
+            self.delivered[signal.mint] = (signal, sol_usd, message, kind)
+            fresh = self.signal_with_profile(signal)
+            if (fresh.twitter, fresh.telegram, fresh.website, fresh.banner, fresh.image) != (
+                    signal.twitter, signal.telegram, signal.website, signal.banner, signal.image):
+                self.queue_alert_update(signal.mint)
+        LOG.info('ALERT %s %s event_to_delivery_ms=%d', state, signal.mint,
+                 max(0, int((time.time() - signal.timestamp) * 1000)))
+
+    def queue_alert_update(self, mint: str):
+        sent = self.delivered.get(mint)
+        if not sent:
+            return
+        original, sol_usd, message_id, kind = sent
+        updated = self.signal_with_profile(original)
+        if (original.twitter, original.telegram, original.website, original.banner, original.image) == (
+                updated.twitter, updated.telegram, updated.website, updated.banner, updated.image):
+            return
+        self.delivered[mint] = (updated, sol_usd, message_id, kind)
+        task = asyncio.create_task(self.telegram.update(message_id, updated, sol_usd,
+                                                        kind=kind, previous=original))
+        self.alert_tasks.add(task)
+        task.add_done_callback(self.alert_tasks.discard)
+
+    async def fetch_profile(self, mint: str):
+        """Resolve metadata out of band; a network error never blocks a call."""
+        primary = None
+        fallback = None
+        try:
+            async with self.session.get(COIN_API + mint,
+                    timeout=aiohttp.ClientTimeout(total=5)) as response:
+                if response.status == 200:
+                    primary = parse_profile(await response.json(content_type=None), pump=True)
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+            pass
+        if primary is None or not (primary.image and primary.banner and
+                                   primary.twitter and primary.telegram and primary.website):
+            try:
+                async with self.session.get(PROFILE_API, params={'mint': mint},
+                        timeout=aiohttp.ClientTimeout(total=5)) as response:
+                    if response.status == 200:
+                        fallback = parse_profile(await response.json(content_type=None), pump=False)
+            except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
+                pass
+        if primary is None:
+            return fallback
+        if fallback is None:
+            return primary
+        return replace(primary,
+            image=primary.image or fallback.image,
+            banner=primary.banner or fallback.banner,
+            twitter=primary.twitter or fallback.twitter,
+            telegram=primary.telegram or fallback.telegram,
+            website=primary.website or fallback.website,
+            supply=primary.supply or fallback.supply,
+            created_at=primary.created_at or fallback.created_at)
 
     async def enrich_unknown(self):
         while True:
-            if self.pending:
+            lookup_launch = bool(self.pending)
+            if lookup_launch:
                 mint = self.pending.pop()
-                lookup_launch = True
-            elif self.image_candidates:
-                mint = self.image_candidates.pop()
-                lookup_launch = False
+            elif self.profile_candidates:
+                mint = self.profile_candidates.pop()
             else:
-                await asyncio.sleep(.5)
+                await asyncio.sleep(.25)
                 continue
             if lookup_launch and mint in self.tokens:
                 self.pending_events.pop(mint, None)
                 continue
-            try:
-                async with self.session.get(COIN_API + mint, timeout=aiohttp.ClientTimeout(total=6)) as response:
-                    if response.status == 200:
-                        info = await response.json(content_type=None)
-                        if isinstance(info, dict):
-                            now = time.time()
-                            if not lookup_launch:
-                                token = self.tokens.get(mint)
-                                if token and info.get('image_uri'):
-                                    token.image = str(info['image_uri'])[:1024]
-                                    self.changed.add(mint)
-                            else:
-                                launched = number(info.get('created_timestamp'))
-                                if launched > 1e11:
-                                    launched /= 1000
-                                if 0 <= now - launched <= MAX_AGE and launched > 0:
-                                    token = Token(mint=mint, launched_at=launched,
-                                        name=str(info.get('name') or '')[:80],
-                                        symbol=str(info.get('symbol') or '')[:28],
-                                        phase='PumpSwap' if info.get('complete') else 'Pump.fun',
-                                        image=str(info.get('image_uri') or '')[:1024])
-                                    self.tokens[mint] = token
-                                    self.changed.add(mint)
-                                    for event in self.pending_events.pop(mint, ()):
-                                        self.process_trade(token, event, now)
-                                    self.lookup_attempts.pop(mint, None)
-                    elif response.status in (401, 403, 429):
-                        LOG.warning('Pump.fun metadata access HTTP %d', response.status)
-                        await asyncio.sleep(3)
-            except (aiohttp.ClientError, asyncio.TimeoutError):
-                pass
+            profile = await self.fetch_profile(mint)
+            now = time.time()
+            token = self.tokens.get(mint)
+            if token is None and profile and 0 <= now - profile.created_at <= MAX_AGE:
+                token = Token(
+                    mint=mint, launched_at=profile.created_at,
+                    phase='PumpSwap' if profile.graduated else 'Pump.fun')
+                self.tokens[mint] = token
+                for event in self.pending_events.pop(mint, ()):
+                    self.process_trade(token, event, now)
+                self.lookup_attempts.pop(mint, None)
+            if token and profile:
+                before = (token.twitter, token.telegram, token.website,
+                          token.banner, token.image)
+                token.name = profile.name or token.name
+                token.symbol = profile.symbol or token.symbol
+                token.image = profile.image or token.image
+                token.banner = profile.banner or token.banner
+                token.twitter = profile.twitter or token.twitter
+                token.telegram = profile.telegram or token.telegram
+                token.website = profile.website or token.website
+                token.supply = token.supply or profile.supply
+                if profile.market_cap_usd:
+                    token.reported_mc_usd = profile.market_cap_usd
+                    token.reported_mc_at = now
+                self.changed.add(mint)
+                if before != (token.twitter, token.telegram, token.website,
+                              token.banner, token.image):
+                    self.queue_alert_update(mint)
             if lookup_launch and mint not in self.tokens and mint in self.pending_events:
-                count = self.lookup_attempts.get(mint, 0) + 1
-                self.lookup_attempts[mint] = count
-                if count <= 3:
+                attempts = self.lookup_attempts.get(mint, 0) + 1
+                self.lookup_attempts[mint] = attempts
+                if attempts <= 3:
                     self.pending.add(mint)
                 else:
                     self.pending_events.pop(mint, None)
                     self.lookup_attempts.pop(mint, None)
-            await asyncio.sleep(1.2)
+            await asyncio.sleep(.5)
 
     def flush(self):
         if self.changed:

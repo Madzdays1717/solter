@@ -1,15 +1,11 @@
-# Riwayat perubahan
+# Perubahan
 
-## 3.2.1
+## 3.4.0
 
-- Menghitung market cap dari harga dan suplai yang diketahui jika transaksi tidak memuat market cap.
-- Menyimpan suplai token pada database agar tersedia setelah aplikasi dijalankan ulang.
-- Mengambil harga SOL/USD dari endpoint data pasar jika pembaruan stream belum tersedia.
-- Menampilkan market cap yang belum diketahui sebagai `Belum tersedia` dan mempertahankan satuan SOL saat kurs USD belum tersedia.
-- Format USD dengan nilai sangat kecil tidak lagi dibulatkan menjadi nol.
-
-## 3.2.0
-
-- Mesin momentum dan risiko dari transaksi Pump.fun/PumpSwap.
-- Pemeriksaan wallet berdasarkan perdagangan yang teramati.
-- Penyimpanan state dan riwayat alert.
+- Pemeriksaan snapshot pasar terarah hanya untuk token yang telah lolos sinyal awal.
+- Pengambilan data Pump.fun dan pool PumpSwap dari DexScreener dengan batas durasi dan kapasitas.
+- Pemeriksaan ulang momentum sesudah snapshot; satu kandidat lambat tidak menghentikan kandidat lain.
+- Data MC dan likuiditas ditampilkan bila tersedia, dengan provenance dan keterbatasan data pasar.
+- Menghindari penolakan palsu akibat data identitas pembeli yang tidak disertakan oleh feed.
+- Notifikasi berbahasa Indonesia menonjolkan momentum terbaru, volume, tekanan beli, dan CA; teks "Perubahan harga 2 menit" dihilangkan.
+- Pelacakan keterlambatan event sampai respons Telegram.

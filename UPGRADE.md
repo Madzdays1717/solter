@@ -1,20 +1,19 @@
-# Pembaruan Solter 3.2.1
+# Upgrade ke Solter 3.4.0
 
-Hentikan aplikasi dan salin `.env` serta `data/` sebagai cadangan. Jangan menghapus database karena berisi riwayat alert.
-
-Jika paket ada di folder Downloads Termux, dari proyek saat ini jalankan:
+1. Hentikan bot di Termux dengan `Ctrl+C`.
+2. Backup file `.env` dan seluruh folder `data/` dari proyek aktif.
+3. Ekstrak ZIP ke folder sementara.
+4. Salin **seluruh** file `.py` dari `solter-v3.4.0/solter/` ke folder `~/solter/solter/`. Ini termasuk modul baru `market.py`.
+5. Ganti `bot.py` dan `requirements.txt` bila diperlukan. Jangan menimpa `.env` atau `data/`.
+6. Jalankan:
 
 ```sh
 cd ~/solter
-cp .env .env.backup
-cp -a data data.backup
-mkdir -p ~/solter-update
-unzip -oq ~/storage/downloads/solter-v3.2.1-mcfix.zip -d ~/solter-update
-cp -f ~/solter-update/solter-v3.2.1/solter/*.py ./solter/
+python -m pip install -r requirements.txt
 python bot.py doctor
 python bot.py run
 ```
 
-Perintah tersebut memperbarui modul Python saja. `bot.py`, `.env`, dan database lama tidak ditimpa. Jika proyek bukan versi 3.2.0, ikuti cara migrasi source lengkap pada README lebih dulu. Setelah startup, database menambahkan kolom `supply` secara otomatis.
+Jangan hanya menyalin `app.py` karena versi ini membutuhkan `market.py` dan perubahan `momentum.py` serta `telegram.py`.
 
-Saat feed tidak memberikan market cap dan jumlah suplai belum diketahui, alert menampilkan `Belum tersedia`. Saat feed harga SOL/USD belum siap, nilai ditampilkan dalam SOL. Aplikasi tetap mengirim alert tanpa menunggu harga tambahan.
+**Validasi live:** perhatikan `SIGNAL` dan `ALERT event_to_delivery_ms` selama scanner berjalan. Alert tidak dijamin muncul dalam jangka waktu tertentu; feed pihak ketiga bisa mengalami masalah koneksi atau keterlambatan.
