@@ -11,6 +11,8 @@ import aiohttp
 from .config import Config
 from .events import Event, number, parse_event
 from .momentum import MAX_AGE, Token
+from .decision import DecisionEngine
+from .outcomes import OutcomeJournal
 from .metadata import parse_profile
 from .market import MarketReader, MarketSnapshot
 from .storage import Storage
@@ -29,12 +31,14 @@ class App:
         self.config = config
         self.storage = storage
         self.tokens = storage.load_launches()
+        self.outcomes = OutcomeJournal(storage)
         self.pending: set[str] = set()
         self.pending_events: dict[str, deque[Event]] = {}
         self.sol_usd = 0.0
         self.sol_price_updated_at = 0.0
         self.last_slot = storage.checkpoint()[0]
         self.last_flush = time.monotonic()
+        self.last_history_cleanup = time.monotonic()
         self.seen: set[tuple[str, str, str, str]] = set()
         self.seen_order: deque[tuple[str, str, str, str]] = deque()
         self.changed: set[str] = set()
@@ -57,7 +61,7 @@ class App:
     async def run(self):
         timeout = aiohttp.ClientTimeout(total=12, connect=6)
         async with aiohttp.ClientSession(timeout=timeout,
-                headers={'User-Agent': 'Solter/3.5.0'}) as session:
+                headers={'User-Agent': 'Solter/3.6.0'}) as session:
             self.session = session
             self.market = MarketReader(session)
             self.social = SocialMonitor(session, self.on_social_report)
@@ -71,7 +75,7 @@ class App:
                 asyncio.create_task(self.refresh_sol_price(), name='sol-price'),
                 asyncio.create_task(self.social.run(), name='social-monitor'),
             ]
-            LOG.info('Solter 3.5.0 running; cached launches=%d', len(self.tokens))
+            LOG.info('Solter 3.6.0 running; cached launches=%d', len(self.tokens))
             try:
                 await asyncio.gather(*jobs)
             finally:
@@ -146,6 +150,9 @@ class App:
                     self.pending_events[event.mint].append(event)
             return
         if now - token.launched_at > MAX_AGE:
+            # Passive measurement only: do not analyze or alert old tokens.
+            if event.action in ('buy', 'sell'):
+                self.outcomes.observe(event)
             return
         if event.action in ('migrate', 'createPool'):
             token.add(event, now)
@@ -155,6 +162,7 @@ class App:
 
     def process_trade(self, token: Token, event: Event, now: float):
         token.add(event, now)
+        self.outcomes.observe(event)
         self.changed.add(token.mint)
         if event.action != 'buy' or now - event.timestamp > 20:
             return
@@ -166,14 +174,15 @@ class App:
             buys = [e for e in token.observations if e.action == 'buy']
             if len(buys) >= 4 and sum(e.volume_sol for e in buys) >= .5:
                 self.social.request(token.mint, priority=sum(e.volume_sol for e in buys))
-        signal, reason = token.decide(now)
-        if signal is None:
-            # Keep the reason locally; persist it in the periodic flush.
-            self.reasons[token.mint] = reason
+        decision = DecisionEngine.evaluate(token, now)
+        self.reasons[token.mint] = decision.reason
+        if len(token.observations) >= 3:
+            self.outcomes.review(token.mint, event, decision.status, decision.reason,
+                                 buy_sol=decision.signal.buy_sol if decision.signal else 0,
+                                 sell_sol=decision.signal.sell_sol if decision.signal else 0)
+        if decision.signal is None or token.mint in self.verifying:
             return
-        if token.mint in self.verifying:
-            return
-        self.social.request(token.mint, priority=100 + signal.buy_sol)
+        self.social.request(token.mint, priority=100 + decision.signal.buy_sol)
         self.verifying.add(token.mint)
         task = asyncio.create_task(self.verify_and_deliver(token.mint))
         self.alert_tasks.add(task)
@@ -189,18 +198,28 @@ class App:
             token = self.tokens.get(mint)
             if token is None:
                 return
-            signal, reason = token.decide(time.time())
+            decision = DecisionEngine.evaluate(token, time.time())
+            signal = decision.signal
+            last_trade = max(token.observations, key=lambda e: (e.timestamp, e.slot), default=None)
+            if last_trade:
+                self.outcomes.review(mint, last_trade, decision.status, decision.reason,
+                                     buy_sol=signal.buy_sol if signal else 0,
+                                     sell_sol=signal.sell_sol if signal else 0)
             if signal is None:
-                self.reasons[mint] = reason
+                self.reasons[mint] = decision.reason
                 return
             if snapshot:
                 # External snapshots confirm available data, but do not override
                 # the chronology of the incoming live transaction stream.
                 if snapshot.liquidity_usd and token.phase == 'PumpSwap' and snapshot.liquidity_usd < 3000:
                     self.reasons[mint] = 'liquidity too thin'
+                    if last_trade:
+                        self.outcomes.review(mint, last_trade, 'REJECT', 'liquidity too thin')
                     return
                 if snapshot.buys_5m + snapshot.sells_5m >= 20 and snapshot.sells_5m > 3 * max(1, snapshot.buys_5m):
                     self.reasons[mint] = 'market sell pressure'
+                    if last_trade:
+                        self.outcomes.review(mint, last_trade, 'WATCH', 'market sell pressure')
                     return
                 signal = replace(
                     signal, reported_mc_usd=snapshot.market_cap_usd or signal.reported_mc_usd,
@@ -390,6 +409,7 @@ class App:
             self.storage.save_launches([self.tokens[mint] for mint in self.changed
                                         if mint in self.tokens])
             self.changed.clear()
+        self.outcomes.flush()
         if self.reasons:
             self.storage.mark_reasons(self.reasons)
             self.reasons.clear()
@@ -400,14 +420,17 @@ class App:
             await asyncio.sleep(10)
             now = time.time()
             self.flush()
+            if time.monotonic() - self.last_history_cleanup >= 3600:
+                self.storage.prune_history()
+                self.last_history_cleanup = time.monotonic()
             for mint, token in list(self.tokens.items()):
-                if now - token.launched_at > MAX_AGE:
+                if now - token.launched_at > MAX_AGE + self.outcomes.HORIZON + 30:
                     del self.tokens[mint]
             if self.social:
                 self.social.prune(set(self.tokens))
-            LOG.info('LIVE connected=%s events=%d tracked=%d signals=%d sol_usd=%s',
+            LOG.info('LIVE connected=%s events=%d tracked=%d signals=%d outcomes=%d sol_usd=%s',
                      self.stream.connected, self.intake_count, len(self.tokens),
-                     self.call_count, round(self.sol_usd, 2))
+                     self.call_count, len(self.outcomes.states), round(self.sol_usd, 2))
             if self.social:
                 LOG.info('SOCIAL requests=%d failures=%d queued=%d reports=%d',
                          self.social.queries, self.social.failures,

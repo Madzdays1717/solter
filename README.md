@@ -1,28 +1,44 @@
-# Solter 3.5.0
+# Solter 3.6.0
 
-Scanner momentum untuk token Pump.fun dan PumpSwap dengan analisis transaksi lokal serta pengamatan sosial berbasis bukti. Solter berjalan di Termux dengan sumber data publik dan mengirim sinyal ke Telegram. Sinyal bukan rekomendasi investasi maupun jaminan token aman.
+Pemindai momentum Pump.fun dan PumpSwap yang menerima transaksi live, memilih kandidat berdasarkan bukti pasar terbaru, lalu mengirim alert Telegram berbahasa Indonesia.
 
-## Alur kerja
+## Arsitektur
 
-1. `stream.py` menerima event launch, trade, dan migrasi.
-2. `events.py` memvalidasi dan menormalkan event, termasuk trader yang tercantum pada feed.
-3. `momentum.py` menghitung tekanan beli, volume dan pergerakan harga. `risk.py` meringkas aktivitas wallet **yang teramati**; tidak mengarang saldo holder atau identitas insider.
-4. `market.py` meminta snapshot untuk kandidat yang memenuhi syarat, dengan tenggat pendek. Data terlambat tidak menghambat penerimaan transaksi lain.
-5. `social.py` mengumpulkan **postingan Bluesky yang menyebut CA secara eksplisit** untuk kandidat prioritas. Jumlah posting, penulis unik, perkembangan per interval, serta kemiripan teks dihitung lokal. Pencarian berjalan pada worker terpisah; feed sosial tidak menentukan boleh/tidaknya alert.
-6. `telegram.py` mengirim alert berbahasa Indonesia. Apabila bukti sosial tiba setelah alert, Solter dapat memperbarui pesan yang sama.
-7. `storage.py` menyimpan peluncuran, riwayat alert, alasan penyaringan, dan ringkasan pengamatan sosial dalam SQLite.
+| Modul | Tugas |
+| --- | --- |
+| `stream.py` | Menjaga koneksi event transaksi dan pemulihannya |
+| `events.py` | Memvalidasi serta menormalkan transaksi |
+| `momentum.py` | Menghitung harga, volume, tekanan beli, dan kondisi awal kandidat |
+| `risk.py` | Merangkum perilaku wallet dari transaksi yang benar-benar teramati |
+| `decision.py` | Menentukan CALL, WATCH, atau REJECT dari bukti terbaru |
+| `market.py` | Mengambil data pasar untuk kandidat terpilih, dengan tenggat singkat |
+| `social.py` | Meringkas penyebutan alamat kontrak dalam posting Bluesky publik |
+| `outcomes.py` | Mencatat keputusan dan harga yang kemudian teramati pada stream |
+| `storage.py` | Menyimpan state, riwayat keputusan, dan pengiriman alert dalam SQLite |
+| `telegram.py` | Menyiapkan pesan, gambar, tautan, serta tombol Salin CA |
+| `app.py` | Mengatur aliran data dan tugas yang berjalan secara independen |
 
-## Cakupan sosial dan batas analisis
+## Pemilihan token
 
-Solter mengamati sebagian posting publik **Bluesky**, bukan keseluruhan X/Twitter, Telegram, TikTok, atau seluruh internet. Postingan harus memuat alamat kontrak yang sama agar tidak tertukar dengan token berticker serupa. Banyaknya posting di feed terbatas **tidak dapat dipakai sebagai estimasi jumlah seluruh posting di internet**.
+Solter memusatkan evaluasi pada token yang diluncurkan dalam 60 menit terakhir. Kandidat 0–30 menit mendapat persyaratan aktivitas awal; token 30–60 menit harus menunjukkan pembelian yang lebih meyakinkan.
 
-- Status `Pembicaraan terpantau` menunjukkan adanya penyebutan CA pada sampel.
-- `Perhatian meningkat` dan `Perhatian mereda` adalah perubahan **dalam sampel terbatas**, bukan klaim meme sedang viral secara global.
-- `Pola promosi serupa` berarti sebagian posting memiliki teks yang hampir identik; bukan bukti bot, insider, maupun manipulasi terkoordinasi.
-- Tidak ditemukannya posting **bukan** bukti token tidak viral. Jika API sosial memblokir atau membatasi pencarian, analisis pasar dan Telegram tetap berfungsi.
-- Tidak ada inferensi top holder, persen developer holder, rug probability, ataupun jaminan sell pada harga tertentu. Analisis saldo yang akurat memerlukan data on-chain tambahan.
+Setiap transaksi masuk memperbarui pengamatan lokal. Jika bukti aktivitas cukup, mesin keputusan memeriksa:
 
-Pencarian sosial dibatasi satu request sekitar 10 detik, maksimum 120 kandidat tertunda, dan tidak menganalisis token yang sudah kehilangan relevansi dalam antrean. Setiap token diberi jeda minimal 60 detik antar pencarian. Saat penyedia merespons 429/403, pencarian ditunda sementara.
+- Tekanan beli dan jual, volume bersih, serta keberlanjutan arus beli dalam 25–45 detik terakhir.
+- Apakah harga mulai turun dari puncak terbaru bersamaan dengan dominasi penjualan.
+- Apakah pembelian terbaru melemah tajam dibanding periode sebelumnya.
+- Konsentrasi pembelian berdasarkan **wallet yang teridentifikasi dalam feed**.
+- Risiko penjualan pembuat token yang teramati dan kecukupan likuiditas ketika informasinya tersedia.
+
+**CALL** berarti kriteria pasar yang teramati terpenuhi, bukan jaminan token aman atau akan naik. **WATCH** berarti bukti belum cukup atau momentum melemah dan bisa dievaluasi ulang jika data baru datang. **REJECT** dipakai untuk risiko tertentu yang sudah jelas terdeteksi. Informasi yang belum tersedia tidak dianggap bernilai nol ataupun sebagai bukti keamanan.
+
+Pemeriksaan pasar bagi kandidat potensial berlangsung independen dan memiliki tenggat pendek. Scanner terus menerima transaksi saat pembacaan tambahan berlangsung. Informasi sosial melengkapi alert secara terpisah; cakupannya hanya posting publik Bluesky yang menyebut alamat kontrak secara eksplisit.
+
+## Riwayat hasil keputusan
+
+`outcomes.py` menyimpan harga ketika sebuah kandidat mulai ditinjau, beserta harga tertinggi dan terendah yang **kemudian diterima lewat feed yang sama** selama maksimal 30 menit. Jurnal ini tidak memerlukan request harga tambahan. Riwayat keputusan disimpan di `decision_history` dan tersedia melalui `trace`.
+
+Pengukuran tersebut hanya mencakup transaksi yang berhasil diterima. Puncak harga yang tercatat bukan bukti transaksi dapat dieksekusi pada harga itu, dan bukan laba bersih. Jurnal belum melakukan perubahan aturan otomatis; hasilnya digunakan untuk audit dan kalibrasi berikutnya.
 
 ## Instalasi Termux
 
@@ -34,8 +50,17 @@ python bot.py doctor
 python bot.py run
 ```
 
-Isi `TELEGRAM_BOT_TOKEN` dan `TELEGRAM_CHAT_ID` dalam `.env`. Jalankan `python bot.py stats` untuk metrik database, dan `python bot.py trace --mint ALAMAT_TOKEN` untuk riwayat token beserta ringkasan sosial teramati. Simpan `.env` dan `data/` hanya di perangkat pribadi.
+Isi `TELEGRAM_BOT_TOKEN` dan `TELEGRAM_CHAT_ID` di `.env`. Perintah pengamatan:
 
-## Keandalan
+```sh
+python bot.py stats
+python bot.py trace --mint ALAMAT_TOKEN
+```
 
-Provider transaksi Pump.fun/PumpSwap merupakan pihak ketiga sehingga akses, kuota, dan kelengkapan tidak dijamin. Sumber pencarian Bluesky juga dapat menerapkan batas akses. Untuk pengukuran keterlambatan, perhatikan log `SIGNAL` dan `ALERT ... event_to_delivery_ms`. Evaluasi kualitas alert dengan histori token yang lolos **dan** yang gagal.
+`stats` menampilkan jumlah token yang pernah ditinjau, sampel keputusan, dan berapa token memiliki puncak 2× **teramati**. `trace` memperlihatkan alasan keputusan dan jangkauan observasi. File konfigurasi serta database disimpan secara lokal.
+
+## Keandalan dan keterbatasan
+
+Kecepatan dan kelengkapan bergantung pada feed transaksi pihak ketiga. Feed bisa terlambat, terputus, atau kehilangan event. Pengecekan holder sebenarnya, insider, rug probability, dan kemampuan menjual dengan slippage tertentu memerlukan data tambahan yang belum tersedia secara andal pada jalur ini. Jangan menganggap ketiadaan peringatan sebagai bukti token aman.
+
+Untuk memeriksa latensi, amati log `SIGNAL` dan `ALERT ... event_to_delivery_ms`. Evaluasi ketepatan scanner dengan membandingkan call serta token yang terlewat, termasuk pengaruh fee dan slippage.

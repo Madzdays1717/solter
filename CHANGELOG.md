@@ -1,10 +1,12 @@
-# Catatan Rilis
+# Solter 3.6.0
 
-## 3.5.0 — Social Observation
+## Smart Decision Engine
 
-- Menambahkan `social.py` untuk pengamatan posting Bluesky publik yang menyebut CA token.
-- Menghitung jumlah posting, akun unik, perubahan perhatian dalam interval waktu, dan kemiripan pola teks secara lokal.
-- Menyimpan ringkasan sosial di SQLite dan menampilkannya melalui `trace --mint`.
-- Menambahkan informasi sosial ke Telegram jika tersedia; pekerjaan jaringan sosial diproses terpisah dari pengiriman alert.
-- Membatasi permintaan sosial secara otomatis dan menghormati pembatasan penyedia.
-- Mempertahankan evaluator pasar dan pengamanan yang ada tanpa menjadikan analisis sosial sebagai syarat call.
+- Menambahkan modul `decision.py` untuk mengevaluasi kekuatan pembeli terbaru, tekanan jual, penurunan harga dari puncak, dan konsentrasi pembelian yang teramati.
+- Memisahkan keputusan `CALL`, `WATCH`, dan `REJECT` tanpa memperlambat penerimaan event transaksi.
+- Mengulang keputusan sesudah pengambilan informasi pasar kandidat agar momentum yang sudah hilang tidak tetap dipanggil.
+- Menambahkan `outcomes.py` yang menyimpan hasil pengamatan pasca-keputusan dari feed transaksi yang sudah berjalan, tanpa polling tambahan.
+- Memperluas database dengan `decision_outcomes` dan `decision_history`. Perintah `stats` dan `trace` menampilkan hasil pengamatan serta alasan keputusan.
+- Menjaga histori pengamatan maksimal 30 hari untuk mengendalikan ukuran penyimpanan.
+
+Pengamatan harga yang tercatat bukan hasil perdagangan aktual. Kinerja live belum divalidasi sampai feed berhasil diakses dan alert Telegram teruji.

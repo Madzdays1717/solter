@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .addresses import valid_address
 from .momentum import Token
+from .outcomes import Outcome
 
 
 class Storage:
@@ -32,6 +33,29 @@ class Storage:
             CREATE TABLE IF NOT EXISTS stream_state (
                 key TEXT PRIMARY KEY, value TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS decision_outcomes (
+                mint TEXT PRIMARY KEY,
+                observed_at REAL NOT NULL,
+                first_price_sol REAL NOT NULL,
+                last_price_sol REAL NOT NULL,
+                max_price_sol REAL NOT NULL,
+                min_price_sol REAL NOT NULL,
+                last_at REAL NOT NULL,
+                status TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                observed_trades INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS decision_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mint TEXT NOT NULL,
+                at REAL NOT NULL,
+                status TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                price_sol REAL NOT NULL,
+                buy_sol REAL NOT NULL,
+                sell_sol REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_decision_history_mint ON decision_history(mint, at);
             CREATE TABLE IF NOT EXISTS social_observations (
                 mint TEXT PRIMARY KEY, observed_at REAL NOT NULL,
                 status TEXT NOT NULL, posts INTEGER NOT NULL,
@@ -68,7 +92,7 @@ class Storage:
 
     def load_launches(self) -> dict[str, Token]:
         rows = self.db.execute('SELECT * FROM launches WHERE created_at >= ?',
-                               (time.time() - 3600,))
+                               (time.time() - 5500,))
         result: dict[str, Token] = {}
         for row in rows:
             try:
@@ -148,6 +172,47 @@ class Storage:
                   report.posts, report.authors, report.recent, report.earlier,
                   report.similar_pct, report.topic))
 
+    def load_outcomes(self) -> dict[str, Outcome]:
+        # Resume passive observations after a restart.
+        rows = self.db.execute('SELECT * FROM decision_outcomes WHERE observed_at >= ?',
+                               (time.time() - 1900,))
+        return {row['mint']: Outcome(
+            mint=row['mint'], observed_at=row['observed_at'],
+            first_price_sol=row['first_price_sol'], last_price_sol=row['last_price_sol'],
+            max_price_sol=row['max_price_sol'], min_price_sol=row['min_price_sol'],
+            last_at=row['last_at'], status=row['status'], reason=row['reason'],
+            observed_trades=row['observed_trades'], dirty=False,
+        ) for row in rows}
+
+    def save_outcomes(self, states: list[Outcome], history: list[tuple]):
+        with self.db:
+            if states:
+                self.db.executemany('''
+                    INSERT INTO decision_outcomes
+                    (mint,observed_at,first_price_sol,last_price_sol,max_price_sol,
+                     min_price_sol,last_at,status,reason,observed_trades)
+                    VALUES (?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(mint) DO UPDATE SET
+                    last_price_sol=excluded.last_price_sol,
+                    max_price_sol=excluded.max_price_sol,
+                    min_price_sol=excluded.min_price_sol,
+                    last_at=excluded.last_at,status=excluded.status,
+                    reason=excluded.reason,observed_trades=excluded.observed_trades
+                ''', [(x.mint, x.observed_at, x.first_price_sol, x.last_price_sol,
+                       x.max_price_sol, x.min_price_sol, x.last_at, x.status,
+                       x.reason, x.observed_trades) for x in states])
+            if history:
+                self.db.executemany('''INSERT INTO decision_history
+                    (mint,at,status,reason,price_sol,buy_sol,sell_sol)
+                    VALUES (?,?,?,?,?,?,?)''', history)
+
+    def prune_history(self):
+        """Keep durable outcome evidence without indefinite disk growth."""
+        cutoff = time.time() - 30 * 86400
+        with self.db:
+            self.db.execute('DELETE FROM decision_history WHERE at < ?', (cutoff,))
+            self.db.execute('DELETE FROM decision_outcomes WHERE observed_at < ?', (cutoff,))
+
     def already_alerted(self, mint: str) -> bool:
         for table in ('deliveries', 'alerts', 'calls'):
             if table not in self._tables:
@@ -189,6 +254,12 @@ class Storage:
                 'SELECT state, COUNT(*) total FROM deliveries GROUP BY state')},
             'checkpoint_slot': self.checkpoint()[0],
             'social_tokens': self.db.execute('SELECT COUNT(*) FROM social_observations').fetchone()[0],
+            'reviewed_tokens': self.db.execute('SELECT COUNT(*) FROM decision_outcomes').fetchone()[0],
+            'decision_samples': self.db.execute('SELECT COUNT(*) FROM decision_history').fetchone()[0],
+            'observed_2x': self.db.execute('''SELECT COUNT(*) FROM decision_outcomes
+                WHERE first_price_sol > 0 AND max_price_sol >= 2 * first_price_sol''').fetchone()[0],
+            'outcomes_with_10_trades': self.db.execute('''SELECT COUNT(*) FROM decision_outcomes
+                WHERE observed_trades >= 10''').fetchone()[0],
         }
 
     def trace(self, mint: str) -> dict:
@@ -201,6 +272,19 @@ class Storage:
             launch['early_buyers'] = len(json.loads(launch['early_buyers']))
         social = self.db.execute('SELECT * FROM social_observations WHERE mint=?',
                                  (mint,)).fetchone()
+        outcome = self.db.execute('SELECT * FROM decision_outcomes WHERE mint=?',
+                                  (mint,)).fetchone()
+        history = self.db.execute('''SELECT at,status,reason,price_sol,buy_sol,sell_sol
+            FROM decision_history WHERE mint=? ORDER BY at DESC LIMIT 12''', (mint,))
+        outcome_info = dict(outcome) if outcome else None
+        if outcome_info and outcome_info['first_price_sol'] > 0:
+            first = outcome_info['first_price_sol']
+            outcome_info['observed_max_change_pct'] = round(
+                (outcome_info['max_price_sol'] / first - 1) * 100, 2)
+            outcome_info['observed_min_change_pct'] = round(
+                (outcome_info['min_price_sol'] / first - 1) * 100, 2)
         return {'launch': launch,
                 'delivery': dict(delivery) if delivery else None,
-                'social': dict(social) if social else None}
+                'social': dict(social) if social else None,
+                'outcome': outcome_info,
+                'decision_history': [dict(row) for row in history]}
